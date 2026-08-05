@@ -75,7 +75,13 @@ Lemma V_to_Rot_const0 p k :
   (V p)^^k *> (const 0) = 0 >> (Rot p)^^k *> (const 0).
 Proof. unfold V, Rot. apply lpow_rotate_const0. Qed.
 
-Definition P  : list Sym := U 0.        Definition Q4 : list Sym := U 2.        Definition M5 : list Sym := U 3.        Definition T3 : list Sym := U 1.        Definition J3 : list Sym := [1;1;1;0].  Definition K4 : list Sym := [1;1;1;1;0]. Definition MIDA : list Sym := [1;0;1;1;1;0;1;1;1;1].
+Definition P  : list Sym := U 0.        
+Definition Q4 : list Sym := U 2.        
+Definition M5 : list Sym := U 3.        
+Definition T3 : list Sym := U 1.        
+Definition J3 : list Sym := [1;1;1;0].  
+Definition K4 : list Sym := [1;1;1;1;0]. 
+Definition MIDA : list Sym := [1;0;1;1;1;0;1;1;1;1].
 Definition MIDB : list Sym := [1;0;1;1].
 
 Definition pairw (a b : nat) : list Sym := [1]^^a ++ [0]^^b.
