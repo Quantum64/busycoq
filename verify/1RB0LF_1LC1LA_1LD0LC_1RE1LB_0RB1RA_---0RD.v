@@ -1,4521 +1,2508 @@
-From BusyCoq Require Import Individual62.
-From Coq Require Import String Bool List Arith Lia.
-Import List ListNotations.
-Open Scope nat_scope.
+From BusyCoq Require Import Individual62 ES_v3 DivModCases.
+From Coq Require Import String List ZArith NArith Lia.
+Import ListNotations.
 Set Default Goal Selector "1".
+Ltac es_v3_TL ::= constr:(N.to_nat 1000).
 
 Definition tm : TM := Eval compute in
-  TM_from_str "1RB0LF_1LC1LA_1LD0LC_1RE1LB_0RB1RA_---0RD"%string.
+  TM_from_str "1RB0LF_1LC1LA_1LD0LC_1RE1LB_0RB1RA_---0RD".
+Notation "c -->* c'" := (c -[tm]->* c') (at level 40).
+Notation "c -->+ c'" := (c -[tm]->+ c') (at level 40).
 
-Definition machine_state := Q.
-Record config := cfg {
-  st : machine_state; left : list Sym; scan : Sym; right : list Sym
-}.
-Definition peek (xs : list Sym) := List.hd S0 xs.
-Definition goL q w c := cfg q (List.tl (left c)) (peek (left c)) (w :: right c).
-Definition goR q w c := cfg q (w :: left c) (peek (right c)) (List.tl (right c)).
+Ltac prove_literal_steps count := lazymatch count with S ?k =>
+  eapply multistep_progress with (n:=k); apply multistep_c_spec; vm_compute; reflexivity end.
+Tactic Notation "literal_steps" constr(n) := prove_literal_steps n.
 
-Definition step (c : config) : option config :=
-  match tm (st c, scan c) with
-  | Some (w, L, q) => Some (goL q w c)
-  | Some (w, R, q) => Some (goR q w c)
-  | None => None
-  end.
+Definition U := [S1;S1;S1;S0].
+Definition V := [S1;S1;S1;S1;S1;S1;S0].
+Definition K a b r := 0inf <{{D}} [1;0] *> U^^a *> V *> U^^b *> [0] *> r.
+Definition J a r := 0inf <{{D}} [1;1;1;1;0] *> U^^a *> [1;1;1;1] *> r.
+Definition G a r := 0inf <{{D}} [1;1;1;1;0] *> U^^(1+a) *> [0] *> r.
 
-Definition blank := cfg A [] S0 [].
-Fixpoint advance n c : config :=
-  match n with
-  | O => c
-  | S n => match step c with Some d => advance n d | None => c end
-  end.
+Lemma K_step a b r : K a (1+b) r -->+ K (1+a) b ([0;1] *> r).
+Proof. unfold K,U,V. es' a b & r. Qed.
 
-Lemma advance_halted n c : step c = None -> advance n c = c.
-Proof. destruct n; cbn; intro H; [reflexivity | rewrite H; reflexivity]. Qed.
+Lemma K_end a r : K a 0 r -->+ J (1+a) r.
+Proof. unfold K,J,U,V. es' a & r. Qed.
 
-Lemma advance_add n m c : advance (n+m) c = advance m (advance n c).
+Lemma K_iter b a r : K a b r -->+ J (1+b+a) ([0;1]^^b *> r).
 Proof.
-  revert c; induction n as [|n IH]; intro c; cbn; [reflexivity |].
-  destruct (step c) eqn:H; [apply IH | symmetry; apply advance_halted; exact H].
+  gen a r. induction b; intros.
+  - apply K_end.
+  - cbn[Nat.add]. follow11 K_step. follow10 (IHb (1+a) ([0;1] *> r)).
+    replace (1+b+(1+a)) with (S (S (b+a))) by lia.
+    rewrite lpow_shift'. finish.
 Qed.
 
-Definition Progress (a b : config) : Prop :=
-  exists n, 0<n /\ advance n a=b.
+Lemma G_step a r : G a r -->+ K 0 a ([0;1] *> r).
+Proof. unfold G,K,U,V. es' a & r. Qed.
 
-Lemma progress_trans a b c : Progress a b -> Progress b c -> Progress a c.
+Lemma G_iter a r : G a r -->+ J (1+a) ([0;1]^^(1+a) *> r).
 Proof.
-  intros [n [Hn H1]] [m [Hm H2]].
-  exists (n+m); split; [lia | rewrite advance_add,H1; exact H2].
+  follow11 G_step. follow10 K_iter.
+  rewrite Nat.add_0_r,lpow_shift'. finish.
 Qed.
-
-Lemma progress_rule n a b a' b' :
-  advance n a'=b' -> 0<n -> a=a' -> b'=b -> Progress a b.
-Proof. intros H Hn -> <-; exists n; auto. Qed.
-
-Lemma progress_after n a b c : advance n a=b -> Progress b c -> Progress a c.
-Proof.
-  intros Hbefore [m [Hm Hafter]].
-  exists (n+m); split; [lia |rewrite advance_add,Hbefore; exact Hafter].
-Qed.
-
-Definition compact_config (c : config) : cconfig :=
-  (left c, right c, scan c, st c).
-Definition decode (c : config) : Q * tape :=
-  cconfig_to_config (compact_config c).
-
-Lemma compact_step c :
-  cconfig_step tm (compact_config c) =
-  option_map compact_config (step c).
-Proof.
-  destruct c as [q l b r]; destruct q,b; destruct l,r; reflexivity.
-Qed.
-
-Lemma literal_step_sound c d : step c = Some d ->
-  decode c -[tm]-> decode d.
-Proof.
-  intro H.
-  pose proof (cconfig_step_spec tm (compact_config c)) as Hstep.
-  rewrite compact_step,H in Hstep; exact Hstep.
-Qed.
-
-Lemma decode_blank : decode blank = c0.
-Proof. reflexivity. Qed.
-
-Lemma advance_evstep n c : decode c -[tm]->* decode (advance n c).
-Proof.
-  revert c; induction n as [|n IH]; intro c; cbn [advance].
-  - constructor.
-  - destruct (step c) as [d|] eqn:Hstep.
-    + eapply evstep_step; [apply literal_step_sound; exact Hstep|apply IH].
-    + constructor.
-Qed.
-
-Lemma advance_progress n c : 0<n ->
-  step (advance n c) <> None ->
-  decode c -[tm]->+ decode (advance n c).
-Proof.
-  destruct n as [|n]; [lia|].
-  intros _ Hlive; cbn [advance] in *.
-  destruct (step c) as [d|] eqn:Hstep.
-  - eapply progress_intro; [apply literal_step_sound; exact Hstep|apply advance_evstep].
-  - contradiction.
-Qed.
-
-Fixpoint copies (n : nat) (w : list Sym) : list Sym :=
-  match n with O => [] | S n => w ++ copies n w end.
-
-Lemma copies_add n m w : copies (n+m) w = copies n w ++ copies m w.
-Proof. induction n; cbn; [reflexivity | rewrite IHn, app_assoc; reflexivity]. Qed.
-
-Lemma copies_slide n w r : copies n w ++ w ++ r = w ++ copies n w ++ r.
-Proof.
-  induction n; cbn; [reflexivity |].
-  repeat rewrite <- app_assoc; rewrite IHn; reflexivity.
-Qed.
-
-Lemma copies_succ_end n w : copies (S n) w = copies n w ++ w.
-Proof.
-  rewrite <- (Nat.add_1_r n), copies_add; cbn; rewrite app_nil_r; reflexivity.
-Qed.
-
-Lemma copies_rotate n u v r :
-  copies n (u++v) ++ u ++ r = u ++ copies n (v++u) ++ r.
-Proof.
-  induction n; cbn; [reflexivity |].
-  repeat rewrite <- app_assoc; rewrite IHn; reflexivity.
-Qed.
-
-Lemma copies_double n w : copies (2*n) w = copies n (w++w).
-Proof.
-  induction n; cbn [copies]; [reflexivity |].
-  replace (2*S n) with (S (S (2*n))) by lia.
-  cbn [copies]; rewrite IHn; repeat rewrite <- app_assoc; reflexivity.
-Qed.
-
-Lemma copies_prefix_eq n m w a b : n=m -> a=b ->
-  copies n w++a=copies m w++b.
-Proof. intros -> ->; reflexivity. Qed.
-
-Lemma copies_prefix_left n m w a b : m<=n ->
-  copies (n-m) w++a=b -> copies n w++a=copies m w++b.
-Proof.
-  intros H Htail; replace n with (m+(n-m)) by lia.
-  rewrite copies_add; repeat rewrite <- app_assoc.
-  rewrite Htail; reflexivity.
-Qed.
-
-Lemma copies_prefix_right n m w a b : n<=m ->
-  a=copies (m-n) w++b -> copies n w++a=copies m w++b.
-Proof.
-  intros H Htail; replace m with (n+(m-n)) by lia.
-  rewrite copies_add; repeat rewrite <- app_assoc.
-  rewrite Htail; reflexivity.
-Qed.
-
-Lemma copies_peel n w r : 0<n ->
-  copies n w++r=w++copies (n-1) w++r.
-Proof.
-  intro H; replace n with (S (n-1)) at 1 by lia.
-  cbn [copies]; rewrite <- app_assoc; reflexivity.
-Qed.
-
-Lemma d011 l r :
-  advance 4 (cfg D l S0 (S1::S1::r)) =
-  cfg D (S0::S1::l) S0 r.
-Proof. reflexivity. Qed.
-
-Lemma d0six l r :
-  advance 12 (cfg D l S0 (S1::S1::S1::S1::S1::S1::r)) =
-  cfg D (S0::S1::S0::S1::S0::S1::l) S0 r.
-Proof. reflexivity. Qed.
-
-Lemma d0four l r :
-  advance 8 (cfg D l S0 (S1::S1::S1::S1::r)) =
-  cfg D (S0::S1::S0::S1::l) S0 r.
-Proof. reflexivity. Qed.
-
-Lemma d000 l r :
-  advance 4 (cfg D l S0 (S0::S0::r)) =
-  cfg D l S1 (S1::S1::r).
-Proof. reflexivity. Qed.
-
-Lemma empty_left r :
-  advance 3 (cfg D [] S1 r) = cfg D [] S0 (S1::S1::S1::r).
-Proof. reflexivity. Qed.
-
-Lemma d0101 l r :
-  advance 6 (cfg D l S0 (S1::S0::S1::r)) =
-  cfg D (S0::S1::l) S0 (S1::r).
-Proof. reflexivity. Qed.
-
-Lemma d001 l r :
-  advance 7 (cfg D l S0 (S0::S1::r)) =
-  cfg D (S0::l) S0 (S1::r).
-Proof. reflexivity. Qed.
-
-Lemma d11110 l r :
-  advance 4 (cfg D (S0::S1::S0::S1::l) S1 r) =
-  cfg D l S1 (S1::S0::S1::S1::r).
-Proof. reflexivity. Qed.
-
-Lemma d1gap l r :
-  advance 3 (cfg D (S0::S0::S1::l) S1 r) =
-  cfg D l S1 (S1::S1::S1::r).
-Proof. reflexivity. Qed.
-
-Lemma d0reverse l r :
-  advance 8 (cfg D (S0::S1::l) S0 (S1::S0::S0::r)) =
-  cfg D l S1 (S1::S0::S0::S0::S1::r).
-Proof. reflexivity. Qed.
-
-Lemma left_edge r :
-  advance 4 (cfg D [S0;S1] S1 r) =
-  cfg D [] S0 (S1::S0::S1::S1::r).
-Proof. reflexivity. Qed.
-
-Lemma alternating_left n l r :
-  advance (4*n) (cfg D (copies n [S0;S1;S0;S1] ++ l) S1 r) =
-  cfg D l S1 (copies n [S1;S0;S1;S1] ++ r).
-Proof.
-  revert r; induction n as [|n IH]; intro r; cbn [copies]; [reflexivity |].
-  replace (4*S n) with (4+4*n) by lia.
-  rewrite advance_add; cbn [app]; rewrite d11110, IH.
-  f_equal; change (copies n [S1;S0;S1;S1] ++ [S1;S0;S1;S1] ++ r =
-                  [S1;S0;S1;S1] ++ copies n [S1;S0;S1;S1] ++ r).
-  apply copies_slide.
-Qed.
-
-Lemma triple_right_step l r :
-  advance 10 (cfg D l S0 (S1::S1::S1::S0::S1::r)) =
-  cfg D (S0::S1::S0::S1::l) S0 (S1::r).
-Proof. reflexivity. Qed.
-
-Lemma triple_right n l r :
-  advance (10*n) (cfg D l S0 (copies n [S1;S1;S1;S0] ++ S1::r)) =
-  cfg D (copies n [S0;S1;S0;S1] ++ l) S0 (S1::r).
-Proof.
-  revert l; induction n as [|n IH]; intro l; cbn [copies]; [reflexivity |].
-  replace (10*S n) with (10+10*n) by lia.
-  rewrite advance_add; cbn [app].
-  destruct n as [|n].
-  - cbn [copies app]; rewrite triple_right_step; reflexivity.
-  - cbn [copies app] in *.
-    rewrite triple_right_step, IH.
-    f_equal.
-    change ([S0;S1;S0;S1] ++
-       copies n [S0;S1;S0;S1] ++ [S0;S1;S0;S1] ++ l =
-       [S0;S1;S0;S1] ++ [S0;S1;S0;S1] ++
-       copies n [S0;S1;S0;S1] ++ l).
-    rewrite copies_slide; reflexivity.
-Qed.
-
-Definition K a b r := cfg D [] S0
-  ([S1;S0] ++ copies a [S1;S1;S1;S0] ++
-   [S1;S1;S1;S1;S1;S1;S0] ++
-   copies b [S1;S1;S1;S0] ++ S0::r).
-
-Lemma start_repeat n l r :
-  advance 6 (cfg D l S0
-    (S1::S0::copies n [S1;S1;S1;S0] ++ S1::r)) =
-  cfg D (S0::S1::l) S0
-    (copies n [S1;S1;S1;S0] ++ S1::r).
-Proof. destruct n; cbn [copies app]; apply d0101. Qed.
-
-Lemma alternating_left_succ n l r :
-  advance (4*S n) (cfg D
-    (S0::S1::S0::S1::copies n [S0;S1;S0;S1] ++ l) S1 r) =
-  cfg D l S1 (copies (S n) [S1;S0;S1;S1] ++ r).
-Proof. exact (alternating_left (S n) l r). Qed.
-
-Lemma zero_repeat n l r :
-  advance 7 (cfg D l S0
-    (S0 :: copies n [S1;S1;S1;S0] ++ S1::r)) =
-  cfg D (S0::l) S0 (copies n [S1;S1;S1;S0] ++ S1::r).
-Proof. destruct n; cbn [copies app]; apply d001. Qed.
-
-Lemma rotate_Q n r :
-  copies n [S1;S0;S1;S1] ++ S1::S0::r =
-  S1::S0::copies n [S1;S1;S1;S0] ++ r.
-Proof. exact (copies_rotate n [S1;S0] [S1;S1] r). Qed.
-
-Lemma rotate_head n r :
-  S1::S1::copies n [S1;S0;S1;S1] ++ r =
-  copies n [S1;S1;S1;S0] ++ S1::S1::r.
-Proof. symmetry; exact (copies_rotate n [S1;S1] [S1;S0] r). Qed.
-
-Lemma K_successor a b r :
-  advance (14*(a+b)+48) (K a (S b) r) = K (S a) b (S0::S1::r).
-Proof.
-  unfold K at 1.
-  rewrite copies_succ_end.
-  repeat rewrite <- app_assoc.
-  replace (14*(a+b)+48) with
-    (6 + (10*a + (12 + (7 + (10*b + (4 + (8 +
-      (4*b + (3 + (4*(S a) + 4)))))))))) by lia.
-  rewrite advance_add; cbn [app]; rewrite start_repeat.
-  rewrite advance_add, triple_right.
-  rewrite advance_add, d0six.
-  rewrite advance_add, zero_repeat.
-  rewrite advance_add, triple_right.
-  rewrite advance_add, d011.
-  rewrite advance_add, d0reverse.
-  rewrite advance_add, alternating_left.
-  cbn [copies app].
-  rewrite advance_add, d1gap.
-  rewrite advance_add, alternating_left_succ.
-  rewrite left_edge.
-  unfold K; f_equal.
-  rewrite rotate_Q, rotate_head; reflexivity.
-Qed.
-
-Definition J n r := cfg D [] S0
-  ([S1;S1;S1;S1;S0] ++ copies n [S1;S1;S1;S0] ++
-   [S1;S1;S1;S1] ++ r).
-
-Lemma padded_word a :
-  S0::S1::S0::S1::S0::S1::
-    copies a [S0;S1;S0;S1] ++ [S0;S1] =
-  copies (S (S a)) [S0;S1;S0;S1].
-Proof.
-  induction a; [reflexivity |].
-  exact (f_equal (fun r : list Sym => S0::S1::S0::S1::r) IHa).
-Qed.
-
-Lemma padded_left a r :
-  advance (4*(a+2)) (cfg D
-    (S0::S1::S0::S1::S0::S1::
-      copies a [S0;S1;S0;S1] ++ [S0;S1]) S1 r) =
-  cfg D [] S1 (copies (a+2) [S1;S0;S1;S1] ++ r).
-Proof.
-  rewrite padded_word.
-  replace (S (S a)) with (a+2) by lia.
-  pose proof (alternating_left (a+2) [] r) as H.
-  rewrite app_nil_r in H; exact H.
-Qed.
-
-Lemma K_terminal a r :
-  advance (14*a+33) (K a 0 r) = J (S a) r.
-Proof.
-  unfold K.
-  cbn [copies app].
-  replace (14*a+33) with (6+(10*a+(12+(4+(4*(a+2)+3))))) by lia.
-  rewrite advance_add, start_repeat.
-  rewrite advance_add, triple_right.
-  rewrite advance_add, d0six.
-  rewrite advance_add, d000.
-  rewrite advance_add, padded_left.
-  rewrite empty_left.
-  unfold J; f_equal.
-  replace (a+2) with (S (S a)) by lia.
-  cbn [copies app].
-  rewrite rotate_head; reflexivity.
-Qed.
-
-Definition phase_clock a b := (b+1)*(14*(a+b)+34)-1.
-
-Lemma K_phase b a r :
-  advance (phase_clock a b) (K a b r) =
-  J (a+b+1) (copies b [S0;S1] ++ r).
-Proof.
-  revert a r; induction b as [|b IH]; intros a r.
-  - replace (phase_clock a 0) with (14*a+33) by (unfold phase_clock; lia).
-    replace (a+0+1) with (S a) by lia.
-    cbn [copies app]; apply K_terminal.
-  - replace (phase_clock a (S b)) with
-      (14*(a+b)+48 + phase_clock (S a) b) by (unfold phase_clock; nia).
-    rewrite advance_add, K_successor, IH.
-    replace (S a+b+1) with (a+S b+1) by lia.
-    change (J (a+S b+1) (copies b [S0;S1] ++ [S0;S1] ++ r) =
-            J (a+S b+1) ([S0;S1] ++ copies b [S0;S1] ++ r)).
-    rewrite copies_slide; reflexivity.
-Qed.
-
-Definition H n r := cfg D
-  (copies (S n) [S0;S1;S0;S1] ++ [S0;S0;S1;S0;S1])
-  S0 r.
-
-Lemma J_entry n r : advance (10*n+23) (J n r) = H n r.
-Proof.
-  unfold J.
-  replace (10*n+23) with (8+(7+(10*n+8))) by lia.
-  rewrite advance_add; cbn [app]; rewrite d0four.
-  rewrite advance_add, zero_repeat.
-  rewrite advance_add, triple_right.
-  rewrite d0four; reflexivity.
-Qed.
-
-Lemma alternating_right n l r :
-  advance (6*n) (cfg D l S0 (S1::copies n [S0;S1] ++ r)) =
-  cfg D (copies n [S0;S1] ++ l) S0 (S1::r).
-Proof.
-  revert l; induction n as [|n IH]; intro l; cbn [copies app]; [reflexivity |].
-  replace (6*S n) with (6+6*n) by lia.
-  rewrite advance_add, d0101, IH.
-  f_equal.
-  change (copies n [S0;S1] ++ [S0;S1] ++ l =
-    [S0;S1] ++ copies n [S0;S1] ++ l).
-  apply copies_slide.
-Qed.
-
-Lemma q_right_step l r :
-  advance 10 (cfg D l S0 (S1::S0::S1::S1::S1::r)) =
-  cfg D (S0::S1::S0::S1::l) S0 (S1::r).
-Proof. reflexivity. Qed.
-
-Lemma q_right n l r :
-  advance (10*n) (cfg D l S0
-    (copies n [S1;S0;S1;S1] ++ S1::r)) =
-  cfg D (copies n [S0;S1;S0;S1] ++ l) S0 (S1::r).
-Proof.
-  revert l; induction n as [|n IH]; intro l; cbn [copies app]; [reflexivity |].
-  replace (10*S n) with (10+10*n) by lia.
-  rewrite advance_add.
-  destruct n as [|n].
-  - cbn [copies app]; rewrite q_right_step; reflexivity.
-  - cbn [copies app] in *; rewrite q_right_step, IH.
-    f_equal.
-    change ([S0;S1;S0;S1] ++ copies n [S0;S1;S0;S1] ++
-      [S0;S1;S0;S1] ++ l =
-      [S0;S1;S0;S1] ++ [S0;S1;S0;S1] ++
-      copies n [S0;S1;S0;S1] ++ l).
-    rewrite copies_slide; reflexivity.
-Qed.
-
-Lemma odd_turn l r :
-  advance 4 (cfg D (S0::S1::S0::S0::S1::S0::S1::l) S1 r) =
-  cfg D (S1::S0::S1::l) S0 (S1::S0::S1::S1::r).
-Proof. reflexivity. Qed.
-
-Lemma d1double l r :
-  advance 5 (cfg D (S0::S1::S1::S0::S1::l) S1 r) =
-  cfg D l S1 (S1::S0::S0::S1::S1::r).
-Proof. reflexivity. Qed.
-
-Lemma left_finish n r :
-  advance (4*n+7) (cfg D
-    (copies n [S0;S1;S0;S1] ++ [S0;S0;S1;S0;S1])
-    S1 (S1::S0::S0::r)) = K 0 n r.
-Proof.
-  replace (4*n+7) with (4*n+(3+4)) by lia.
-  rewrite advance_add, alternating_left.
-  rewrite advance_add, d1gap, left_edge.
-  unfold K; cbn [copies app]; f_equal.
-  rewrite rotate_Q; reflexivity.
-Qed.
-
-Lemma q_right_succ n l r :
-  advance (10*S n) (cfg D l S0
-    (S1::S0::S1::S1::copies n [S1;S0;S1;S1] ++ S1::r)) =
-  cfg D (copies (S n) [S0;S1;S0;S1] ++ l) S0 (S1::r).
-Proof. exact (q_right (S n) l r). Qed.
-
-Lemma p_half_slide n r :
-  S0::S1::copies n [S0;S1;S0;S1] ++ r =
-  copies n [S0;S1;S0;S1] ++ S0::S1::r.
-Proof. symmetry; exact (copies_rotate n [S0;S1] [S0;S1] r). Qed.
-
-Lemma double_zero_frontier r :
-  advance 19 (cfg D [] S0 (S1::S1::S1::S1::S0::S0::r)) =
-  cfg D [] S0 (S1::S1::S1::S1::S0::S1::S1::S1::S1::r).
-Proof. reflexivity. Qed.
 
 Inductive block := Three | Six.
-Definition block_bits b := match b with
-  | Three => [S1;S1;S1;S0]
-  | Six => [S1;S1;S1;S1;S1;S1;S0] end.
+Definition block_bits b := match b with Three => U | Six => V end.
 Definition pushed_bits b := match b with
-  | Three => [S0;S1;S0;S1]
-  | Six => [S0;S0;S1;S0;S1;S0;S1] end.
+  Three => [S0;S1;S0;S1] | Six => [S0;S0;S1;S0;S1;S0;S1] end.
 Definition returned_bits b := match b with
-  | Three => [S1;S0;S1;S1]
-  | Six => [S1;S0;S1;S1;S1;S1;S1] end.
-Definition right_cost b := match b with Three => 10 | Six => 19 end.
-Definition left_cost b := match b with Three => 4 | Six => 7 end.
-
-Fixpoint core_bits w := match w with
-  | [] => [] | b::w => block_bits b ++ core_bits w end.
+  Three => [S1;S0;S1;S1] | Six => [S1;S0;S1;S1;S1;S1;S1] end.
+Definition core_bits := flat_map block_bits.
+Definition returned_core := flat_map returned_bits.
 Fixpoint pushed_core w := match w with
-  | [] => [] | b::w => pushed_core w ++ pushed_bits b end.
-Fixpoint returned_core w := match w with
-  | [] => [] | b::w => returned_bits b ++ returned_core w end.
-Fixpoint right_clock w := match w with
-  | [] => 0 | b::w => right_cost b + right_clock w end.
-Fixpoint left_clock w := match w with
-  | [] => 0 | b::w => left_cost b + left_clock w end.
-Definition weight w := right_clock w + left_clock w.
+  [] => [] | b::w => pushed_core w ++ pushed_bits b end.
 
 Lemma core_bits_app u v : core_bits (u++v) = core_bits u ++ core_bits v.
-Proof. induction u; cbn; [reflexivity | rewrite IHu, app_assoc; reflexivity]. Qed.
+Proof. apply flat_map_app. Qed.
 
-Lemma right_block b w l r :
-  advance (right_cost b) (cfg D l S0 (core_bits (b::w) ++ S1::r)) =
-  cfg D (pushed_bits b ++ l) S0 (core_bits w ++ S1::r).
-Proof. destruct b; destruct w as [|b w]; [reflexivity | destruct b; reflexivity | reflexivity | destruct b; reflexivity]. Qed.
-
-Lemma right_core w l r :
-  advance (right_clock w) (cfg D l S0 (core_bits w ++ S1::r)) =
-  cfg D (pushed_core w ++ l) S0 (S1::r).
-Proof.
-  revert l; induction w as [|b w IH]; intro l; [reflexivity |].
-  cbn [right_clock]; rewrite advance_add, right_block, IH.
-  cbn [pushed_core]; rewrite app_assoc; reflexivity.
-Qed.
-
-Lemma left_block b l r :
-  advance (left_cost b) (cfg D (pushed_bits b ++ l) S1 r) =
-  cfg D l S1 (returned_bits b ++ r).
-Proof. destruct b; reflexivity. Qed.
-
-Lemma left_core w l r :
-  advance (left_clock w) (cfg D (pushed_core w ++ l) S1 r) =
-  cfg D l S1 (returned_core w ++ r).
-Proof.
-  revert l r; induction w as [|b w IH]; intros l r; [reflexivity |].
-  cbn [left_clock pushed_core].
-  rewrite Nat.add_comm, advance_add, <- app_assoc, IH, left_block.
-  cbn [returned_core]; rewrite app_assoc; reflexivity.
-Qed.
-
-Lemma returned_rotation w r :
-  returned_core w ++ S1::S0::r = S1::S0::core_bits w ++ r.
-Proof.
-  induction w as [|b w IH]; [reflexivity |].
-  cbn [returned_core]; rewrite <- app_assoc, IH.
-  destruct b; cbn [returned_bits core_bits block_bits app]; reflexivity.
-Qed.
-
-Definition W w r := cfg D [] S0 (S1::S0::core_bits w ++ S0::r).
-
-Lemma core_start w l r :
-  advance 6 (cfg D l S0 (S1::S0::core_bits w ++ S1::r)) =
-  cfg D (S0::S1::l) S0 (core_bits w ++ S1::r).
-Proof. destruct w as [|b w]; [reflexivity | destruct b; reflexivity]. Qed.
-
-Lemma W_transfer w r :
-  advance (weight w+22) (W (w++[Three]) r) = W (Three::w) (S0::S1::r).
-Proof.
-  unfold W at 1; rewrite core_bits_app; cbn [core_bits block_bits app].
-  rewrite <- app_assoc; cbn [app].
-  replace (weight w+22) with (6+(right_clock w+(4+(8+(left_clock w+4))))) by
-    (unfold weight; lia).
-  rewrite advance_add, core_start, advance_add, right_core.
-  rewrite advance_add, d011, advance_add, d0reverse.
-  rewrite advance_add, left_core, left_edge.
-  unfold W; cbn [core_bits block_bits app]; f_equal.
-  rewrite returned_rotation; reflexivity.
-Qed.
-
-Lemma weight_app u v : weight (u++v) = weight u + weight v.
-Proof.
-  unfold weight; induction u as [|b u IH]; cbn; [lia |].
-  destruct b; cbn in *; lia.
-Qed.
-
-Lemma weight_threes n : weight (repeat Three n) = 14*n.
-Proof.
-  unfold weight; induction n; cbn in *; lia.
-Qed.
-
-Lemma weight_cons_three w : weight (Three::w) = 14+weight w.
-Proof. unfold weight; cbn; lia. Qed.
-
-Lemma threes_succ_end n : repeat Three (S n) = repeat Three n ++ [Three].
-Proof. induction n; cbn; [reflexivity | f_equal; exact IHn]. Qed.
-
-Lemma W_phase n w r :
-  advance (n*(weight w+14*n+8)) (W (w++repeat Three n) r) =
-  W (repeat Three n++w) (copies n [S0;S1] ++ r).
-Proof.
-  revert w r; induction n as [|n IH]; intros w r.
-  - cbn [repeat copies app]; rewrite app_nil_r; reflexivity.
-  - rewrite threes_succ_end, app_assoc.
-    replace (S n*(weight w+14*S n+8)) with
-      (weight (w++repeat Three n)+22 + n*(weight (Three::w)+14*n+8)) by
-      (rewrite weight_app, weight_threes, weight_cons_three; nia).
-    rewrite advance_add, W_transfer.
-    change (advance (n*(weight (Three::w)+14*n+8))
-      (W ((Three::w)++repeat Three n) (S0::S1::r)) =
-      W ((repeat Three n++[Three])++w)
-        (copies (S n) [S0;S1] ++ r)).
-    rewrite IH, <- app_assoc; cbn [app copies].
-    pose proof (copies_slide n [S0;S1] r) as Hslide.
-    cbn [app] in Hslide; unfold Sym in *; rewrite Hslide; reflexivity.
-Qed.
-
-Lemma returned_core_app u v :
-  returned_core (u++v) = returned_core u ++ returned_core v.
-Proof. induction u; cbn; [reflexivity | rewrite IHu, app_assoc; reflexivity]. Qed.
-
-Lemma core_zero w l r :
-  advance 7 (cfg D l S0 (S0::core_bits w ++ S1::r)) =
-  cfg D (S0::l) S0 (core_bits w ++ S1::r).
-Proof. destruct w as [|b w]; [reflexivity | destruct b; reflexivity]. Qed.
-
-Lemma core_turn w l r :
-  advance (weight w+30) (cfg D l S0
-    ([S1;S1;S1;S1;S0] ++ core_bits w ++
-     [S1;S1;S1;S0;S0;S0] ++ r)) =
-  cfg D (S0::S1::l) S1
-    (S1::S1::S1::returned_core w ++ S1::S0::S0::S0::S1::S0::r).
-Proof.
-  replace (weight w+30) with
-    (8+(7+(right_clock w+(4+(8+(left_clock w+3)))))) by (unfold weight; lia).
-  cbn [app]; rewrite advance_add, d0four, advance_add, core_zero.
-  rewrite advance_add, right_core, advance_add, d011, advance_add, d0reverse.
-  rewrite advance_add, left_core, d1gap; reflexivity.
-Qed.
-
-Definition mixed_word w := Three::Three::w++[Three;Three].
-Definition mixed_suffix m w r := copies m [S0;S1] ++
-  core_bits (mixed_word w) ++ S0::S0::r.
-
-Lemma mixed_weight w : weight (Three::w++[Three]) = weight w+28.
-Proof. rewrite weight_cons_three, weight_app; unfold weight; cbn; lia. Qed.
-
-Lemma J_mixed_turn n m w r :
-  advance (10*n+6*m+weight w+88) (J n (mixed_suffix (S m) w r)) =
-  cfg D (copies (S m) [S0;S1] ++ S0::copies (S n) [S0;S1;S0;S1] ++
-      [S0;S0;S1;S0;S1]) S1
-    (S1::S1::S1::returned_core (Three::w++[Three]) ++
-      S1::S0::S0::S0::S1::S0::r).
-Proof.
-  replace (10*n+6*m+weight w+88) with
-    ((10*n+23)+(7+(6*m+(weight (Three::w++[Three])+30)))) by
-    (rewrite mixed_weight; lia).
-  rewrite advance_add, J_entry; unfold H, mixed_suffix, mixed_word.
-  cbn [copies app].
-  rewrite advance_add, d001, advance_add, alternating_right.
-  cbn [core_bits block_bits].
-  rewrite core_bits_app; cbn [core_bits block_bits app].
-  pose proof (core_turn (Three::w++[Three])
-    (copies m [S0;S1] ++ S0::copies (S n) [S0;S1;S0;S1] ++
-      [S0;S0;S1;S0;S1]) r) as Hturn.
-  cbn [core_bits block_bits copies app] in Hturn.
-  rewrite core_bits_app in Hturn; cbn [core_bits block_bits app] in Hturn.
-  repeat rewrite <- app_assoc in *; cbn [app] in *; exact Hturn.
-Qed.
-
-Lemma right_core_three w l r :
-  advance (right_clock (Three::w)) (cfg D l S0
-    (S1::S1::S1::S0::core_bits w ++ S1::r)) =
-  cfg D (pushed_core (Three::w) ++ l) S0 (S1::r).
-Proof. exact (right_core (Three::w) l r). Qed.
-
-Lemma J_mixed_odd n k w r :
-  advance (14*n+30*k+2*weight w+162)
-    (J n (mixed_suffix (2*k+1) w r)) =
-  K 0 n (copies (S k) [S1;S1;S1;S0] ++
-    [S1;S1;S1;S1;S1;S1;S0] ++ core_bits (Three::w) ++
-    S0::S0::S1::S0::S1::S0::r).
-Proof.
-  replace (2*k+1) with (S (2*k)) by lia.
-  replace (14*n+30*k+2*weight w+162) with
-    ((10*n+6*(2*k)+weight w+88)+(4*k+(4+(10*S k+(8+(7+
-      (right_clock (Three::w)+(4+(8+(left_clock (Three::w)+
-        (3+(4*S k+(5+(4*n+7)))))))))))))) by
-    (unfold weight; cbn [right_clock left_clock right_cost left_cost]; lia).
-  rewrite advance_add, J_mixed_turn.
-  cbn [copies app]; rewrite copies_double, p_half_slide.
-  rewrite advance_add, alternating_left, advance_add, odd_turn.
-  rewrite advance_add, q_right_succ.
-  cbn [returned_core returned_bits app].
-  rewrite returned_core_app; cbn [returned_core returned_bits app].
-  repeat rewrite <- app_assoc; cbn [app].
-  rewrite advance_add, d0four, advance_add, d001.
-  rewrite returned_rotation.
-  rewrite advance_add, right_core_three, advance_add, d011, advance_add, d0reverse.
-  rewrite advance_add, left_core.
-  cbn [copies app]; rewrite advance_add, d1gap, p_half_slide.
-  rewrite advance_add, alternating_left_succ, advance_add, d1double.
-  rewrite left_finish, rotate_head.
-  rewrite returned_rotation.
-  reflexivity.
-Qed.
-
-Definition mixed_even_result n k w r := cfg D [] S0
-  ([S1;S1;S1;S1;S0;S0] ++ copies (S n) [S1;S1;S1;S0] ++
-   [S1;S1;S1;S1;S1;S1;S0] ++ copies k [S1;S1;S1;S0] ++
-   [S1;S1;S1;S1;S1;S1;S0] ++ core_bits (Three::w) ++
-   S0::S0::S1::S0::S1::S0::r).
-
-Lemma J_mixed_even n k w r :
-  advance (28*n+30*k+2*weight w+197)
-    (J n (mixed_suffix (2*k+2) w r)) = mixed_even_result n k w r.
-Proof.
-  replace (2*k+2) with (S (S (2*k))) by lia.
-  replace (28*n+30*k+2*weight w+197) with
-    ((10*n+6*S (2*k)+weight w+88)+(4*S k+(3+(4*n+(4+(10*S n+
-      (8+(7+(10*k+(12+(7+(right_clock (Three::w)+(4+(8+
-        (left_clock (Three::w)+(3+(4*S k+(3+(4*S n+(5+3)))))))))))))))))))) by
-    (unfold weight; cbn [right_clock left_clock right_cost left_cost]; lia).
-  rewrite advance_add, J_mixed_turn.
-  cbn [copies app]; rewrite copies_double.
-  rewrite advance_add, alternating_left_succ, advance_add, d1gap, p_half_slide.
-  rewrite advance_add, alternating_left, advance_add, odd_turn.
-  rewrite advance_add, q_right_succ.
-  cbn [copies returned_core returned_bits app].
-  rewrite returned_core_app; cbn [returned_core returned_bits app].
-  repeat rewrite <- app_assoc; cbn [app].
-  rewrite advance_add, d0four, advance_add, d001, rotate_head.
-  rewrite advance_add, triple_right, advance_add, d0six, advance_add, d001.
-  rewrite returned_rotation.
-  rewrite advance_add, right_core_three, advance_add, d011, advance_add, d0reverse.
-  rewrite advance_add, left_core, advance_add, d1gap.
-  rewrite advance_add, alternating_left_succ.
-  cbn [copies app]; rewrite advance_add, d1gap, p_half_slide.
-  rewrite advance_add, alternating_left_succ, advance_add, d1double, empty_left.
-  unfold mixed_even_result; f_equal.
-  rewrite rotate_head; cbn [app].
-  rewrite rotate_head, returned_rotation; reflexivity.
-Qed.
-
-Definition G a r := cfg D [] S0
-  ([S1;S1;S1;S1;S0] ++ copies (S a) [S1;S1;S1;S0] ++ S0::r).
-
-Lemma G_entry a r : advance (14*a+34) (G a r) = K 0 a (S0::S1::r).
-Proof.
-  unfold G; rewrite copies_succ_end.
-  repeat rewrite <- app_assoc; cbn [app].
-  replace (14*a+34) with (8+(7+(10*a+(4+(8+(4*a+(3+4))))))) by lia.
-  rewrite advance_add, d0four, advance_add, zero_repeat.
-  rewrite advance_add, triple_right, advance_add, d011, advance_add, d0reverse.
-  rewrite advance_add, alternating_left, advance_add, d1gap, left_edge.
-  unfold K; cbn [copies app]; f_equal; rewrite rotate_Q; reflexivity.
-Qed.
-
-Lemma G_phase a r :
-  advance ((a+2)*(14*a+34)-1) (G a r) =
-  J (S a) (copies (S a) [S0;S1] ++ r).
-Proof.
-  replace ((a+2)*(14*a+34)-1) with (14*a+34+phase_clock 0 a) by
-    (unfold phase_clock; nia).
-  rewrite advance_add, G_entry, K_phase.
-  cbn [Nat.add copies app].
-  replace (0+a+1) with (S a) by lia.
-  replace (a+1) with (S a) by lia.
-  pose proof (copies_slide a [S0;S1] r) as Hslide.
-  cbn [app] in Hslide; unfold Sym in *; rewrite Hslide; reflexivity.
-Qed.
-
-Lemma B_start w l r :
-  advance 33 (cfg D l S0
-    ([S1;S1;S1;S1;S0;S1;S1;S1;S1;S1;S1;S1;S0] ++
-     core_bits w ++ S1::r)) =
-  cfg D ([S0;S1;S0;S1;S0;S1;S0;S1;S0;S0;S1;S0;S1] ++ l)
-    S0 (core_bits w ++ S1::r).
-Proof. destruct w as [|b w]; [reflexivity | destruct b; reflexivity]. Qed.
-
-Lemma B_transfer w r :
-  advance (weight w+60)
-    (J 0 (core_bits (Three::w++[Three]) ++ S0::S0::r)) =
-  W (Six::Three::Three::w) (S0::S1::S0::r).
-Proof.
-  unfold J; cbn [copies core_bits block_bits app].
-  rewrite core_bits_app; cbn [core_bits block_bits app].
-  repeat rewrite <- app_assoc; cbn [app].
-  replace (weight w+60) with (33+(right_clock w+(4+(8+(left_clock w+(8+(3+4))))))) by
-    (unfold weight; lia).
-  rewrite advance_add.
-  pose proof (B_start w []
-    (S1::S1::S0::S0::S0::r)) as Hstart.
-  cbn [app] in Hstart; rewrite Hstart.
-  rewrite advance_add, right_core, advance_add, d011, advance_add, d0reverse.
-  rewrite advance_add, left_core.
-  change (advance (8+(3+4)) (cfg D
-    (copies 2 [S0;S1;S0;S1] ++ [S0;S0;S1;S0;S1]) S1
-    (returned_core w ++ S1::S0::S0::S0::S1::S0::r)) =
-    W (Six::Three::Three::w) (S0::S1::S0::r)).
-  rewrite advance_add, (alternating_left 2), advance_add, d1gap, left_edge.
-  cbn [copies app]; rewrite returned_rotation; reflexivity.
-Qed.
-
-Lemma core_bits_threes n : core_bits (repeat Three n) =
-  copies n [S1;S1;S1;S0].
-Proof. induction n; cbn; [reflexivity | rewrite IHn; reflexivity]. Qed.
-
-Definition tilted w n r := cfg D
-  ([S0;S1] ++ copies (n+2) [S0;S1;S0;S1] ++
-   [S1;S0;S1;S0;S1] ++ pushed_core w ++ [S0;S1]) S0 r.
-
-Lemma W_multi_six w n r :
-  advance (right_clock w+24*n+73)
-    (W (w++Six::repeat Three n++[Six]) r) = tilted w n r.
-Proof.
-  unfold W; rewrite core_bits_app; cbn [core_bits block_bits app].
-  rewrite core_bits_app; cbn [core_bits block_bits app].
-  rewrite core_bits_threes.
-  replace (right_clock w+24*n+73) with
-    (6+(right_clock w+(12+(7+(10*n+(12+(4+(4*S n+
-      (4+(10*(n+2)+4)))))))))) by lia.
-  repeat rewrite <- app_assoc; cbn [app].
-  rewrite advance_add, core_start, advance_add, right_core.
-  rewrite advance_add, d0six.
-  repeat rewrite <- app_assoc; cbn [app].
-  rewrite advance_add, zero_repeat, advance_add, triple_right.
-  rewrite advance_add, d0six, advance_add, d000.
-  rewrite p_half_slide.
-  rewrite advance_add, alternating_left_succ, advance_add, odd_turn.
-  replace (n+2) with (S (S n)) by lia.
-  rewrite advance_add, q_right_succ, d011.
-  unfold tilted; replace (n+2) with (S (S n)) by lia; reflexivity.
-Qed.
-
-Lemma right_clock_app u v : right_clock (u++v) = right_clock u+right_clock v.
-Proof. induction u; cbn; [lia | rewrite IHu; lia]. Qed.
-
-Lemma right_clock_threes n : right_clock (repeat Three n) = 10*n.
-Proof. induction n; cbn in *; lia. Qed.
-
-Lemma two_six_weight w n :
-  weight (w++Six::repeat Three n++[Six]) = weight w+14*n+52.
-Proof.
-  rewrite weight_app.
-  change (weight w+weight ([Six]++repeat Three n++[Six]) = weight w+14*n+52).
-  rewrite !weight_app, weight_threes.
-  assert (Hsix : weight [Six] = 26) by reflexivity.
-  rewrite Hsix; lia.
-Qed.
-
-Lemma W_multi_six_phase w n b r :
-  advance (b*(weight w+14*(n+b)+60)+right_clock w+10*b+24*n+73)
-    (W ((w++Six::repeat Three n++[Six])++repeat Three b) r) =
-  tilted (repeat Three b++w) n (copies b [S0;S1] ++ r).
-Proof.
-  replace (b*(weight w+14*(n+b)+60)+right_clock w+10*b+24*n+73) with
-    (b*(weight (w++Six::repeat Three n++[Six])+14*b+8)+
-      (right_clock (repeat Three b++w)+24*n+73)) by
-    (rewrite two_six_weight, right_clock_app, right_clock_threes; nia).
-  rewrite advance_add, W_phase.
-  rewrite app_assoc, W_multi_six; reflexivity.
-Qed.
-
-Definition page w := [S1;S1;S1;S1;S0] ++ core_bits w ++ [S0;S0].
-Definition carried w r := cfg D
-  (S0::S0::S1::pushed_core w ++ [S0;S1]) S0 r.
-
-Lemma d1_101 l r :
-  advance 6 (cfg D (S1::S0::S1::l) S1 r) =
-  cfg D (S0::l) S0 (S1::S1::r).
-Proof. reflexivity. Qed.
-
-Lemma core_turn_head v l r :
-  advance (weight v+30) (cfg D l S0
-    (S1::S1::S1::S1::S0::core_bits v ++
-      S1::S1::S1::S0::S0::r)) =
-  cfg D (S0::S1::l) S1
-    (S1::S1::S1::returned_core v ++ S1::S0::S0::S0::S1::r).
-Proof.
-  replace (weight v+30) with
-    (8+(7+(right_clock v+(4+(8+(left_clock v+3)))))) by (unfold weight; lia).
-  rewrite advance_add, d0four, advance_add, core_zero.
-  rewrite advance_add, right_core, advance_add, d011, advance_add, d0reverse.
-  rewrite advance_add, left_core, d1gap; reflexivity.
-Qed.
-
-Definition core_suffix m v r := copies m [S0;S1] ++
-  core_bits (Three::v++[Three]) ++ S0::r.
-
-Lemma T_core_turn w n m v r :
-  advance (6*m+weight v+37) (tilted w n (core_suffix (S m) v r)) =
-  cfg D (copies (S m) [S0;S1] ++
-      S0::S0::S1::copies (n+2) [S0;S1;S0;S1] ++
-      [S1;S0;S1;S0;S1] ++ pushed_core w ++ [S0;S1]) S1
-    (S1::S1::S1::returned_core v ++ S1::S0::S0::S0::S1::r).
-Proof.
-  replace (6*m+weight v+37) with (7+(6*m+(weight v+30))) by lia.
-  unfold tilted, core_suffix; cbn [copies core_bits block_bits app].
-  rewrite core_bits_app; cbn [core_bits block_bits app].
-  repeat rewrite <- app_assoc; cbn [app].
-  rewrite advance_add, d001, advance_add, alternating_right.
-  apply core_turn_head.
-Qed.
-
-Lemma T_core_even w n m v r :
-  advance (4*n+16*m+weight v+64)
-    (tilted w n (core_suffix (2*m+2) v r)) =
-  carried w (copies (n+2) [S1;S1;S1;S0] ++
-    [S1;S1;S1;S1;S1;S1;S0] ++ copies m [S1;S1;S1;S0] ++
-    [S1;S1;S1;S1;S1;S1;S0] ++ core_bits v ++
-    S0::S0::S1::r).
-Proof.
-  replace (2*m+2) with (S (S (2*m))) by lia.
-  replace (4*n+16*m+weight v+64) with
-    ((6*S (2*m)+weight v+37)+(4*S m+(3+(4*(n+2)+6)))) by lia.
-  rewrite advance_add, T_core_turn.
-  cbn [copies app]; rewrite copies_double.
-  rewrite advance_add, alternating_left_succ, advance_add, d1gap.
-  rewrite advance_add, alternating_left, d1_101.
-  unfold carried; f_equal.
-  rewrite rotate_head; cbn [copies app].
-  rewrite rotate_head, returned_rotation; reflexivity.
-Qed.
-
-Lemma T_core_odd_turn w n m v r :
-  advance (4*n+30*m+2*weight v+113)
-    (tilted w n (core_suffix (2*m+1) (v++[Three]) r)) =
-  cfg D (S0::S1::pushed_core w ++ [S0;S1]) S1
-    ([S1;S0;S0;S1;S1] ++ copies (S n) [S1;S0;S1;S1] ++
-     [S1;S0;S0;S1;S1] ++ copies (S m) [S1;S0;S1;S1] ++
-     S1::S1::S1::returned_core v ++
-     S1::S0::S0::S0::S1::S0::S1::r).
-
-Proof.
-  replace (2*m+1) with (S (2*m)) by lia.
-  replace (4*n+30*m+2*weight v+113) with
-    ((6*(2*m)+weight (v++[Three])+37)+(4*m+(4+(10*S m+
-      ((weight v+30)+(4*S m+(5+(4*S n+5)))))))) by
-    (rewrite weight_app; assert (weight [Three]=14) by reflexivity; nia).
-  rewrite advance_add, T_core_turn.
-  cbn [copies app]; rewrite copies_double, p_half_slide.
-  rewrite advance_add, alternating_left.
-  replace (n+2) with (S (S n)) by lia; cbn [copies app].
-  rewrite advance_add, odd_turn, advance_add, q_right_succ.
-  rewrite returned_core_app; cbn [returned_core returned_bits app].
-  repeat rewrite <- app_assoc; cbn [app].
-  rewrite returned_rotation, advance_add, core_turn_head.
-  rewrite p_half_slide, advance_add, alternating_left, advance_add, d1double.
-  rewrite p_half_slide, advance_add, alternating_left_succ, d1double.
-  reflexivity.
-Qed.
+Lemma returned_core_app u v : returned_core (u++v) = returned_core u ++ returned_core v.
+Proof. apply flat_map_app. Qed.
 
 Lemma pushed_core_app u v : pushed_core (u++v) = pushed_core v ++ pushed_core u.
 Proof.
-  induction u; cbn; [rewrite app_nil_r; reflexivity |].
+  induction u; cbn; [rewrite app_nil_r; reflexivity|].
   rewrite IHu, app_assoc; reflexivity.
 Qed.
 
-Lemma left_clock_app u v : left_clock (u++v) = left_clock u+left_clock v.
-Proof. induction u; cbn; [lia | rewrite IHu; lia]. Qed.
+Lemma core_bits_threes n : core_bits ([Three]^^n) = U^^n.
+Proof. unfold core_bits. rewrite flat_map_lpow. reflexivity. Qed.
 
-Lemma carried_return u v r :
-  advance (weight v+left_clock u+23)
-    (carried (u++[Three]) (core_bits (v++[Three]) ++ S0::r)) =
-  W (Three::u++Six::v) (S0::S1::r).
+Lemma pushed_threes n : pushed_core ([Three]^^n) = [0;1;0;1]^^n.
 Proof.
-  replace (weight v+left_clock u+23) with
-    (right_clock v+(4+(8+(left_clock v+(3+(left_clock (u++[Three])+4)))))) by
-    (rewrite left_clock_app; unfold weight; cbn [left_clock left_cost]; lia).
-  unfold carried; rewrite core_bits_app; cbn [core_bits block_bits app].
-  repeat rewrite <- app_assoc; cbn [app].
-  rewrite advance_add, right_core, advance_add, d011, advance_add, d0reverse.
-  rewrite advance_add, left_core, advance_add, d1gap.
-  rewrite advance_add, left_core, left_edge.
-  rewrite returned_core_app; cbn [returned_core returned_bits app].
-  repeat rewrite <- app_assoc; cbn [app].
-  rewrite !returned_rotation.
-  unfold W; cbn [core_bits block_bits app].
-  rewrite core_bits_app; cbn [core_bits block_bits app].
-  repeat rewrite <- app_assoc; reflexivity.
+  induction n; cbn; [reflexivity|].
+  rewrite IHn,lpow_shift. reflexivity.
 Qed.
 
-Lemma core_multi_six v n l r :
-  advance (right_clock v+24*n+67)
-    (cfg D l S0 (core_bits (v++Six::repeat Three n++[Six]) ++ S0::r)) =
-  cfg D ([S0;S1] ++ copies (n+2) [S0;S1;S0;S1] ++
-    [S1;S0;S1;S0;S1] ++ pushed_core v ++ l) S0 r.
+Lemma returned_threes n : returned_core ([Three]^^n) = [1;0;1;1]^^n.
+Proof. unfold returned_core. rewrite flat_map_lpow. reflexivity. Qed.
+
+Lemma returned_rotation w r :
+  returned_core w *> [1;0] *> r = [1;0] *> core_bits w *> r.
 Proof.
-  rewrite core_bits_app; cbn [core_bits block_bits app].
-  rewrite core_bits_app, core_bits_threes; cbn [core_bits block_bits app].
-  replace (right_clock v+24*n+67) with
-    (right_clock v+(12+(7+(10*n+(12+(4+(4*S n+(4+(10*(n+2)+4))))))))) by lia.
-  repeat first [progress cbn [app] | rewrite <- app_assoc].
-  rewrite advance_add, right_core, advance_add, d0six.
-  repeat first [progress cbn [app] | rewrite <- app_assoc].
-  rewrite advance_add, zero_repeat, advance_add, triple_right.
-  rewrite advance_add, d0six, advance_add, d000, p_half_slide.
-  rewrite advance_add, alternating_left_succ, advance_add, odd_turn.
-  replace (n+2) with (S (S n)) by lia.
-  rewrite advance_add, q_right_succ, d011; reflexivity.
+  induction w as [|b w IH]; [reflexivity|].
+  unfold returned_core,core_bits in *; cbn[flat_map].
+  rewrite !Str_app_assoc,IH. destruct b; reflexivity.
+Qed.
+
+Lemma core_starts_one w r : exists t, core_bits w *> [1] *> r=1 >> t.
+Proof. destruct w as [|b w]; [eexists; reflexivity|]. destruct b; eexists; reflexivity. Qed.
+
+Lemma right_block_head b l r :
+  (D,l {{0}} block_bits b *> [1] *> r) -->+
+  (D,(pushed_bits b *> l) {{0}} [1] *> r).
+Proof.
+  destruct b; [literal_steps 10|literal_steps 19].
+Qed.
+
+Lemma right_block b w l r :
+  (D,l {{0}} core_bits (b::w) *> [1] *> r) -->+
+  (D,(pushed_bits b *> l) {{0}} core_bits w *> [1] *> r).
+Proof.
+  change ((D,l {{0}} (block_bits b++core_bits w) *> [1] *> r) -->+
+    (D,(pushed_bits b *> l) {{0}} core_bits w *> [1] *> r)).
+  rewrite Str_app_assoc. destruct (core_starts_one w r) as [t H]. rewrite H.
+  apply right_block_head.
+Qed.
+Lemma core_start w l r :
+  (D,l {{0}} [1;0] *> core_bits w *> [1] *> r) -->+
+  (D,([0;1] *> l) {{0}} core_bits w *> [1] *> r).
+Proof.
+  destruct (core_starts_one w r) as [t H]. rewrite H. literal_steps 6.
+Qed.
+
+Lemma right_core w l r :
+  (D,l {{0}} core_bits w *> [1] *> r) -->*
+  (D,(pushed_core w *> l) {{0}} [1] *> r).
+Proof.
+  gen l. induction w as [|b w IH]; intros; [finish|].
+  follow100 right_block. follow IH. cbn[pushed_core].
+  rewrite Str_app_assoc. finish.
+Qed.
+
+Lemma left_core w l r :
+  (D,(pushed_core w *> l) {{1}} r) -->*
+  (D,l {{1}} returned_core w *> r).
+Proof.
+  gen l r. induction w as [|b w IH]; intros; [finish|].
+  cbn[pushed_core]. rewrite Str_app_assoc. follow IH.
+  destruct b; apply progress_evstep; [literal_steps 4|literal_steps 7].
+Qed.
+
+Definition W w r := 0inf <{{D}} [1;0] *> core_bits w *> [0] *> r.
+Definition tilted w n (r:side) :=
+  (D,([0;1] *> [0;1;0;1]^^(n+2) *> [1;0;1;0;1] *>
+    pushed_core w *> [0;1] *> 0inf) {{0}} r).
+Definition carried w (r:side) :=
+  (D,([0;0;1] *> pushed_core w *> [0;1] *> 0inf) {{0}} r).
+Definition core_suffix m v r :=
+  [0;1]^^m *> core_bits (Three::v++[Three]) *> [0] *> r.
+Definition page w := [1;1;1;1;0] ++ core_bits w ++ [0;0].
+Definition counter_pair a b r :=
+  0inf <{{D}} [1;1;1;1;0] *> U^^a *> [0] *> U^^b *> [0;0] *> r.
+Definition shield a b d r := counter_pair a b
+  (page ([Three]^^(b/2-1)) *> page ([Three]^^d) *> r).
+
+Lemma core_turn l r :
+  (D,l {{0}} [1;1;1;0;0] *> r) -->+ (D,l {{1}} [1;0;0;0;1] *> r).
+Proof. literal_steps 12. Qed.
+
+Lemma left_edge r :
+  (D,([0;1] *> 0inf) {{1}} r) -->+ (0inf <{{D}} [1;0;1;1] *> r).
+Proof. literal_steps 4. Qed.
+
+Lemma W_step w r : W (w++[Three]) r -->+ W (Three::w) ([0;1] *> r).
+Proof.
+  unfold W. rewrite core_bits_app. cbn[core_bits flat_map block_bits].
+  unfold U. rewrite Str_app_assoc. follow10 core_start.
+  follow right_core. follow100 core_turn. follow left_core. follow100 left_edge.
+  change ([1;0;0;0;1] *> r) with ([1;0] *> [0;0;1] *> r).
+  rewrite returned_rotation. finish.
+Qed.
+
+Lemma W_iter n w r :
+  W (w++[Three]^^n) r -->* W ([Three]^^n++w) ([0;1]^^n *> r).
+Proof.
+  gen w r. induction n; intros.
+  - cbn. rewrite app_nil_r. finish.
+  - replace (w++[Three]^^S n) with ((w++[Three]^^n)++[Three])
+      by (rewrite <-app_assoc,lpow_shift; reflexivity).
+    follow100 W_step. follow (IHn (Three::w) ([0;1] *> r)).
+    change (Three::w) with ([Three]++w).
+    rewrite app_assoc,lpow_shift,lpow_shift'. finish.
+Qed.
+
+Ltac sweep1 a l r :=
+  try rewrite !tl_const;
+  cbn[Str_app app];
+  let l := eval cbn[Str_app app] in l in
+  let r := eval cbn[Str_app app] in r in
+  es_v3_nmp_smp (fun s => if (s=?"a")%string then a else O)
+    (fun s => if (s=?"l")%string then l else if (s=?"r")%string then r else 0inf).
+
+Lemma core_zero w l r :
+  (D,l {{0}} [0] *> core_bits w *> [1] *> r) -->+
+  (D,([0] *> l) {{0}} core_bits w *> [1] *> r).
+Proof.
+  destruct (core_starts_one w r) as [t H]. rewrite H. literal_steps 7.
+Qed.
+
+Lemma four_right l r :
+  (D,l {{0}} [1;1;1;1] *> r) -->+ (D,([0;1;0;1] *> l) {{0}} r).
+Proof. literal_steps 8. Qed.
+
+Lemma gap_left l r :
+  (D,([0;0;1] *> l) {{1}} r) -->+ (D,l {{1}} [1;1;1] *> r).
+Proof. literal_steps 3. Qed.
+
+Lemma core_head v l r :
+  (D,l {{0}} [1;1;1;1;0] *> core_bits v *> U *> [0] *> r) -->+
+  (D,([0;1] *> l) {{1}} [1;1;1] *> returned_core v *> [1;0;0;0;1] *> r).
+Proof.
+  unfold U. follow10 four_right. follow100 core_zero.
+  follow right_core. follow100 core_turn. follow left_core. follow100 gap_left. finish.
+Qed.
+
+Lemma W_tilt w n r :
+  W (w++Six::[Three]^^n++[Six]) r -->+ tilted w n r.
+Proof.
+  unfold W. rewrite core_bits_app. cbn[core_bits flat_map block_bits].
+  rewrite core_bits_app,core_bits_threes. cbn[core_bits flat_map block_bits].
+  rewrite !Str_app_assoc. unfold U,V.
+  follow10 core_start. follow right_core.
+  unfold tilted. sweep1 n (pushed_core w *> [0;1] *> 0inf) r.
+Qed.
+
+Lemma W_multi_six w n b r :
+  W ((w++Six::[Three]^^n++[Six])++[Three]^^b) r -->+
+  tilted ([Three]^^b++w) n ([0;1]^^b *> r).
+Proof.
+  eapply evstep_progress_trans; [apply W_iter|].
+  rewrite (app_assoc ([Three]^^b) w (Six::[Three]^^n++[Six])).
+  apply W_tilt.
+Qed.
+
+Lemma zero_one l r :
+  (D,l {{0}} [0;1] *> r) -->+ (D,([0] *> l) {{0}} [1] *> r).
+Proof. literal_steps 7. Qed.
+
+Lemma alternating_step l r :
+  (D,l {{0}} [1;0;1] *> r) -->+ (D,([0;1] *> l) {{0}} [1] *> r).
+Proof. literal_steps 6. Qed.
+
+Lemma alternating_right n l r :
+  (D,l {{0}} [1] *> [0;1]^^n *> r) -->*
+  (D,([0;1]^^n *> l) {{0}} [1] *> r).
+Proof.
+  gen l. induction n; intros; [finish|].
+  cbn[lpow]. rewrite Str_app_assoc. follow100 alternating_step.
+  follow IHn. rewrite lpow_shift'. finish.
+Qed.
+
+Lemma T_turn w n m v r :
+  tilted w n (core_suffix (1+m) v r) -->+
+  (D,([0;1]^^(1+m) *> [0;0;1] *> [0;1;0;1]^^(n+2) *>
+    [1;0;1;0;1] *> pushed_core w *> [0;1] *> 0inf) {{1}}
+    [1;1;1] *> returned_core v *> [1;0;0;0;1] *> r).
+Proof.
+  unfold tilted,core_suffix. cbn[core_bits flat_map block_bits].
+  rewrite core_bits_app. cbn[core_bits flat_map block_bits].
+  rewrite !Str_app_assoc. unfold U.
+  cbn[lpow Nat.add]. rewrite Str_app_assoc.
+  follow10 zero_one. follow alternating_right.
+  follow100 core_head. finish.
+Qed.
+
+Lemma alternating_left n l r :
+  (D,([0;1;0;1]^^n *> l) {{1}} r) -->*
+  (D,l {{1}} [1;0;1;1]^^n *> r).
+Proof.
+  pose proof (left_core ([Three]^^n) l r) as H.
+  rewrite pushed_threes,returned_threes in H. exact H.
+Qed.
+
+Lemma left_101 l r :
+  (D,([1;0;1] *> l) {{1}} r) -->+ (D,([0] *> l) {{0}} [1;1] *> r).
+Proof. literal_steps 6. Qed.
+
+Lemma rotate_return n r :
+  [1;1] *> [1;0;1;1]^^n *> r = U^^n *> [1;1] *> r.
+Proof. symmetry. apply (lpow_rotate' [1;0] [1;1]). Qed.
+
+Lemma T_even w n m v r :
+  tilted w n (core_suffix (2*m+2) v r) -->+
+  carried w (U^^(n+2) *> V *> U^^m *> V *> core_bits v *> [0;0;1] *> r).
+Proof.
+  replace (2*m+2) with (1+(1+2*m)) by lia.
+  follow10 T_turn.
+  replace (1+(1+2*m)) with ((1+m)*2) by lia.
+  rewrite lpow_mul. cbn[lpow app].
+  follow alternating_left. follow100 gap_left. follow alternating_left.
+  follow100 left_101. unfold carried,U,V.
+  change ([1;0;0;0;1] *> r) with ([1;0] *> [0;0;1] *> r).
+  rewrite returned_rotation.
+  rewrite rotate_return. cbn[Nat.add lpow]. rewrite Str_app_assoc.
+  change ([1;1] *> [1;1;1] *> [1;0;1;1] *> [1;0;1;1]^^m *>
+    [1;1;1] *> [1;0] *> core_bits v *> [0;0;1] *> r)
+    with (V *> [1;1] *> [1;0;1;1]^^m *> [1;1;1;1;0] *>
+      core_bits v *> [0;0;1] *> r).
+  rewrite rotate_return. finish.
+Qed.
+
+Lemma carried_return u v r :
+  carried (u++[Three]) (core_bits (v++[Three]) *> [0] *> r) -->+
+  W (Three::u++Six::v) ([0;1] *> r).
+Proof.
+  unfold carried,W. rewrite !core_bits_app.
+  cbn[core_bits flat_map block_bits]. rewrite !Str_app_assoc. unfold U,V.
+  eapply evstep_progress_trans; [apply right_core|].
+  follow10 core_turn. follow left_core. follow100 gap_left. follow left_core.
+  follow100 left_edge. rewrite returned_core_app.
+  cbn[returned_core flat_map returned_bits]. rewrite Str_app_assoc.
+  change ([1;0;0;0;1] *> r) with ([1;0] *> [0;0;1] *> r).
+  rewrite returned_rotation.
+  change (([1;0;1;1]++[]) *> [1;1;1] *> [1;0] *> core_bits v *> [0;0;1] *> r)
+    with ([1;0] *> V *> core_bits v *> [0;0;1] *> r).
+  rewrite returned_rotation,core_bits_app,Str_app_assoc. finish.
 Qed.
 
 Lemma carried_six u v n r :
-  advance (right_clock v+24*n+67)
-    (carried (u++[Three]) (core_bits (v++Six::repeat Three n++[Six]) ++ S0::r)) =
+  carried (u++[Three]) (core_bits (v++Six::[Three]^^n++[Six]) *> [0] *> r) -->+
   tilted (u++Six::v) n r.
 Proof.
-  unfold carried; rewrite core_multi_six.
-  unfold tilted; rewrite !pushed_core_app; cbn [pushed_core pushed_bits app].
-  repeat first [progress cbn [app] | rewrite <- app_assoc].
-  reflexivity.
+  unfold carried,tilted. rewrite !pushed_core_app,!core_bits_app.
+  cbn[pushed_core pushed_bits core_bits flat_map block_bits].
+  rewrite core_bits_app,core_bits_threes. cbn[core_bits flat_map block_bits].
+  rewrite !Str_app_assoc. unfold U,V.
+  eapply evstep_progress_trans; [apply right_core|].
+  sweep1 n (pushed_core v *> [0;0;1] *> [0;1;0;1] *>
+    pushed_core u *> [0;1] *> 0inf) r.
 Qed.
 
-Definition page_core n m v := repeat Three (n+2) ++ Six::repeat Three m ++ Six::v.
-
-Lemma page_core_weight n m v : weight (page_core n m v) =
-  14*n+14*m+weight v+80.
-Proof.
-  unfold page_core.
-  change (weight (repeat Three (n+2) ++ [Six] ++ repeat Three m ++ [Six] ++ v) = 14*n+14*m+weight v+80).
-  rewrite !weight_app, !weight_threes.
-  assert (Hsix : weight [Six] = 26) by reflexivity; rewrite Hsix; lia.
-Qed.
+Definition page_core n m v := [Three]^^(n+2)++Six::[Three]^^m++Six::v.
 
 Lemma page_core_bits n m v : core_bits (page_core n m v) =
-  copies (n+2) [S1;S1;S1;S0] ++ [S1;S1;S1;S1;S1;S1;S0] ++
-  copies m [S1;S1;S1;S0] ++ [S1;S1;S1;S1;S1;S1;S0] ++ core_bits v.
+  U^^(n+2)++V++U^^m++V++core_bits v.
 Proof.
-  unfold page_core; rewrite core_bits_app, core_bits_threes.
-  cbn [core_bits block_bits]; rewrite core_bits_app, core_bits_threes; reflexivity.
+  unfold page_core. rewrite core_bits_app,core_bits_threes.
+  cbn[core_bits flat_map block_bits]. rewrite core_bits_app,core_bits_threes. reflexivity.
 Qed.
 
-Lemma T_core_even_return u n m v r :
-  advance (18*n+30*m+2*weight v+left_clock u+181)
-    (tilted (u++[Three]) n (core_suffix (2*m+2) (v++[Three]) r)) =
-  W (Three::u++Six::page_core n m v) (S0::S1::S0::S1::r).
+Lemma T_even_return u n m v r :
+  tilted (u++[Three]) n (core_suffix (2*m+2) (v++[Three]) r) -->+
+  W (Three::u++Six::page_core n m v) ([0;1;0;1] *> r).
 Proof.
-  replace (18*n+30*m+2*weight v+left_clock u+181) with
-    ((4*n+16*m+weight (v++[Three])+64)+(weight (page_core n m v)+left_clock u+23)) by
-    (rewrite weight_app, page_core_weight;
-      assert (weight [Three]=14) by reflexivity; nia).
-  rewrite advance_add, T_core_even.
-  pose proof (carried_return u (page_core n m v) (S0::S1::r)) as Hreturn.
-  rewrite core_bits_app, page_core_bits in Hreturn.
-  cbn [core_bits block_bits app] in Hreturn.
-  rewrite core_bits_app; cbn [core_bits block_bits app].
-  repeat first [progress cbn [app] in * | rewrite <- app_assoc in *].
-  exact Hreturn.
+  follow10 T_even.
+  eapply progress_evstep.
+  replace (U^^(n+2) *> V *> U^^m *> V *> core_bits (v++[Three]) *> [0;0;1] *> r)
+    with (core_bits (page_core n m v++[Three]) *> [0] *> [0;1] *> r).
+  - apply carried_return.
+  - rewrite !core_bits_app,page_core_bits. cbn[core_bits flat_map block_bits].
+    rewrite !Str_app_assoc. reflexivity.
 Qed.
 
-Definition page_outer u n := Three::u++Six::repeat Three (n+2).
-
-Lemma page_outer_weight u n : weight (page_outer u n) = weight u+14*n+68.
+Lemma T_page u n m c r :
+  tilted (u++[Three]) n
+    ([0;1]^^(2*m+1) *> [0;1;1;1;1;0] *> U^^(1+c) *> [0] *> r) -->+
+  tilted ([Three]^^c++u++Six::[Three]^^(n+2)) m ([0;1]^^(1+c) *> r).
 Proof.
-  unfold page_outer.
-  change (weight ([Three]++u++[Six]++repeat Three (n+2)) = weight u+14*n+68).
-  rewrite !weight_app, weight_threes.
-  assert (weight [Three]=14) by reflexivity; assert (weight [Six]=26) by reflexivity; lia.
-Qed.
-
-Lemma page_outer_clock u n : right_clock (page_outer u n) = right_clock u+10*n+49.
-Proof.
-  unfold page_outer.
-  change (right_clock ([Three]++u++[Six]++repeat Three (n+2)) = right_clock u+10*n+49).
-  rewrite !right_clock_app, right_clock_threes; cbn [right_clock right_cost]; lia.
-Qed.
-
-Lemma T_page_consume u n m b r :
-  advance (b*(weight u+14*(n+m+b)+128)+weight u+28*n+54*m+38*b+303)
-    (tilted (u++[Three]) n
-      (core_suffix (2*m+2) (repeat Three b++[Three]) r)) =
-  tilted (repeat Three b++page_outer u n) m
-    (copies b [S0;S1] ++ S0::S1::S0::S1::r).
-Proof.
-  replace (b*(weight u+14*(n+m+b)+128)+weight u+28*n+54*m+38*b+303) with
-    ((18*n+30*m+2*weight (repeat Three b)+left_clock u+181)+
-      (b*(weight (page_outer u n)+14*(m+b)+60)+right_clock (page_outer u n)+10*b+24*m+73)) by
-    (rewrite weight_threes, page_outer_weight, page_outer_clock; unfold weight; nia).
-  rewrite advance_add, T_core_even_return.
-  pose proof (W_multi_six_phase (page_outer u n) m b (S0::S1::S0::S1::r)) as Hphase.
-  unfold page_outer, page_core in *.
-  repeat first [progress cbn [app] in * | rewrite <- app_assoc in *].
-  exact Hphase.
-Qed.
-
-Lemma pure_page_form p b r :
-  core_suffix (S p) (repeat Three b++[Three]) r =
-  copies p [S0;S1] ++ [S0;S1;S1;S1;S1;S0] ++
-    copies (b+2) [S1;S1;S1;S0] ++ S0::r.
-Proof.
-  unfold core_suffix; rewrite (copies_succ_end p [S0;S1]).
-  cbn [core_bits block_bits].
-  rewrite !core_bits_app, core_bits_threes.
-  rewrite (copies_add b 2 [S1;S1;S1;S0]).
-  repeat first [progress cbn [core_bits block_bits copies app] | rewrite <- app_assoc].
-  reflexivity.
-Qed.
-
-Lemma T_odd_page u n m b r :
-  advance (b*(weight u+14*(n+m+b)+128)+weight u+28*n+54*m+38*b+303)
-    (tilted (u++[Three]) n
-      (copies (2*m+1) [S0;S1] ++ [S0;S1;S1;S1;S1;S0] ++
-        copies (b+2) [S1;S1;S1;S0] ++ S0::r)) =
-  tilted (repeat Three (S b)++u++Six::repeat Three (n+2)) m
-    (copies (b+2) [S0;S1] ++ r).
-Proof.
-  rewrite <- pure_page_form.
-  replace (S (2*m+1)) with (2*m+2) by lia.
-  rewrite T_page_consume.
-  unfold page_outer; rewrite threes_succ_end, (copies_add b 2 [S0;S1]).
-  repeat first [progress cbn [copies app] | rewrite <- app_assoc].
-  reflexivity.
-Qed.
-
-Lemma T_page_one u n m r :
-  advance (14*n+40*m+151)
-    (tilted (u++[Three]) n (core_suffix (2*m+2) [] r)) =
-  tilted (u++Six::repeat Three (n+2)) m (S0::S1::r).
-Proof.
-  replace (14*n+40*m+151) with
-    ((4*n+16*m+weight []+64)+(right_clock (repeat Three (n+2))+24*m+67)) by
-    (rewrite right_clock_threes; assert (weight []=0) by reflexivity; lia).
-  rewrite advance_add, T_core_even; cbn [core_bits].
-  pose proof (carried_six u (repeat Three (n+2)) m (S0::S1::r)) as H.
-  rewrite core_bits_app, core_bits_threes in H.
-  cbn [core_bits block_bits] in H; rewrite core_bits_app, core_bits_threes in H.
-  repeat first [progress cbn [core_bits block_bits app] in * | rewrite <- app_assoc in *].
-  exact H.
-Qed.
-
-Lemma positive_page_form p c r :
-  core_suffix (S p) (repeat Three c) r =
-  copies p [S0;S1] ++ [S0;S1;S1;S1;S1;S0] ++
-    copies (S c) [S1;S1;S1;S0] ++ S0::r.
-Proof.
-  unfold core_suffix; rewrite (copies_succ_end p [S0;S1]).
-  cbn [core_bits block_bits]; rewrite core_bits_app, core_bits_threes.
-  rewrite (copies_succ_end c [S1;S1;S1;S0]).
-  repeat first [progress cbn [core_bits block_bits app] | rewrite <- app_assoc].
-  reflexivity.
-Qed.
-
-Definition page_clock u n m c := (c-1)*weight u + 14*c*n+(14*c+26)*m+
-  14*c*c+110*c+27.
-
-Lemma page_clock_ge2 u n m b : page_clock u n m (b+2) =
-  b*(weight u+14*(n+m+b)+128)+weight u+28*n+54*m+38*b+303.
-Proof. unfold page_clock; replace (b+2-1) with (b+1) by lia; nia. Qed.
-
-Lemma T_positive_page u n m c r : 0 < c ->
-  advance (page_clock u n m c)
-    (tilted (u++[Three]) n
-      (copies (2*m+1) [S0;S1] ++ [S0;S1;S1;S1;S1;S0] ++
-        copies c [S1;S1;S1;S0] ++ S0::r)) =
-  tilted (repeat Three (c-1)++u++Six::repeat Three (n+2)) m
-    (copies c [S0;S1] ++ r).
-Proof.
-  intro Hc; destruct c as [|c]; [lia |].
   destruct c as [|c].
-  - replace (page_clock u n m 1) with (14*n+40*m+151) by
-      (unfold page_clock; nia).
-    rewrite <- (positive_page_form (2*m+1) 0 r).
-    replace (S (2*m+1)) with (2*m+2) by lia.
-    cbn [repeat Nat.sub copies app]; apply T_page_one.
-  - replace (S (S c)) with (c+2) by lia.
-    rewrite page_clock_ge2; replace (c+2-1) with (S c) by lia.
-    apply T_odd_page.
+  - replace ([0;1]^^(2*m+1) *> [0;1;1;1;1;0] *> U^^(1+0) *> [0] *> r)
+      with (core_suffix (2*m+2) [] r).
+    2:{ unfold core_suffix,U. cbn[core_bits flat_map block_bits].
+        replace (2*m+2) with ((2*m+1)+1) by lia. rewrite lpow_add,Str_app_assoc. reflexivity. }
+    follow10 T_even.
+    eapply progress_evstep.
+    replace (U^^(n+2) *> V *> U^^m *> V *> core_bits [] *> [0;0;1] *> r)
+      with (core_bits ([Three]^^(n+2)++Six::[Three]^^m++[Six]) *> [0] *> [0;1] *> r).
+    2:{ rewrite !core_bits_app,!core_bits_threes. cbn[core_bits flat_map block_bits].
+        rewrite core_bits_app,core_bits_threes,!Str_app_assoc. reflexivity. }
+    apply carried_six.
+  - replace ([0;1]^^(2*m+1) *> [0;1;1;1;1;0] *> U^^(1+S c) *> [0] *> r)
+      with (core_suffix (2*m+2) ([Three]^^c++[Three]) r).
+    2:{ unfold core_suffix. cbn[core_bits flat_map block_bits].
+        rewrite !core_bits_app,core_bits_threes.
+        replace (2*m+2) with ((2*m+1)+1) by lia.
+        rewrite lpow_add,!Str_app_assoc.
+        cbn[core_bits flat_map block_bits Nat.add lpow].
+        rewrite !Str_app_assoc. cbn[app Str_app].
+        change (U^^c *> [1;1;1;0] *> [1;1;1;0] *> [0] *> r)
+          with (U^^c *> U *> U *> [0] *> r).
+        rewrite !(@lpow_shift' Sym c U). reflexivity. }
+    follow10 T_even_return.
+    unfold page_core.
+    replace (Three::u++Six::[Three]^^(n+2)++Six::[Three]^^m++Six::[Three]^^c)
+      with (((Three::u++Six::[Three]^^(n+2))++Six::[Three]^^m++[Six])++[Three]^^c)
+      by (repeat first [rewrite <- app_assoc | progress cbn[app]]; reflexivity).
+    follow100 W_multi_six.
+    change (Three::u++Six::[Three]^^(n+2))
+      with ([Three]++(u++Six::[Three]^^(n+2))).
+    rewrite app_assoc,lpow_shift.
+    change ([0;1;0;1] *> r) with ([0;1] *> [0;1] *> r).
+    rewrite !lpow_shift'. finish.
 Qed.
 
-Definition short_frame w n m r := cfg D
-  (S0::S0::S1::copies (S n) [S0;S1;S0;S1] ++
-    [S1;S0;S1;S0;S1] ++ pushed_core w ++ [S0;S1]) S0
-  (copies (m+2) [S1;S1;S1;S0] ++ [S1;S1;S1;S1;S0;S1] ++ r).
+Lemma q_right_step l r :
+  (D,l {{0}} [1;0;1;1;1] *> r) -->+
+  (D,([0;1;0;1] *> l) {{0}} [1] *> r).
+Proof. literal_steps 10. Qed.
 
-Lemma T_short_turn w n m r :
-  advance (30*m+77) (tilted w n (core_suffix (2*m+1) [] r)) =
-  short_frame w n m r.
+Lemma q_right n l r :
+  (D,l {{0}} [1;0;1;1]^^n *> [1] *> r) -->*
+  (D,([0;1;0;1]^^n *> l) {{0}} [1] *> r).
 Proof.
-  replace (2*m+1) with (S (2*m)) by lia.
-  replace (30*m+77) with
-    ((6*(2*m)+weight []+37)+(4*m+(4+(10*S m+(8+(4+(4*(m+2)+6))))))) by
-    (assert (weight []=0) by reflexivity; lia).
-  rewrite advance_add, T_core_turn.
-  cbn [copies app]; rewrite copies_double, p_half_slide.
-  rewrite advance_add, alternating_left.
-  replace (n+2) with (S (S n)) by lia; cbn [copies app].
-  rewrite advance_add, odd_turn, advance_add, q_right_succ.
-  cbn [returned_core app]; rewrite advance_add, d0four, advance_add, d000.
-  replace (m+2) with (S (S m)) by lia.
-  rewrite advance_add, alternating_left_succ, d1_101.
-  unfold short_frame; replace (m+2) with (S (S m)) by lia.
-  f_equal; rewrite rotate_head; reflexivity.
+  gen l. induction n; intros; [finish|].
+  cbn[lpow]. rewrite Str_app_assoc.
+  destruct n as [|n].
+  - follow100 q_right_step. finish.
+  - cbn[lpow] in *. rewrite Str_app_assoc in *.
+    follow100 q_right_step. follow IHn. rewrite !Str_app_assoc,lpow_shift'. finish.
 Qed.
 
-Lemma pushed_threes n : pushed_core (repeat Three n) =
-  copies n [S0;S1;S0;S1].
+Lemma odd_turn l r :
+  (D,([0;1;0;0;1;0;1] *> l) {{1}} r) -->+
+  (D,([1;0;1] *> l) {{0}} [1;0;1;1] *> r).
+Proof. literal_steps 4. Qed.
+
+Lemma double_left l r :
+  (D,([0;1;1;0;1] *> l) {{1}} r) -->+ (D,l {{1}} [1;0;0;1;1] *> r).
+Proof. literal_steps 5. Qed.
+
+Lemma half_slide n r :
+  [0;1] *> [0;1;0;1]^^n *> r = [0;1;0;1]^^n *> [0;1] *> r.
+Proof. symmetry. apply (lpow_rotate' [0;1] [0;1]). Qed.
+
+Lemma T_odd_turn w n m v r :
+  tilted w n (core_suffix (2*m+1) (v++[Three]) r) -->+
+  (D,([0;1] *> pushed_core w *> [0;1] *> 0inf) {{1}}
+    [1;0;0;1;1] *> [1;0;1;1]^^(1+n) *>
+    [1;0;0;1;1] *> [1;0;1;1]^^(1+m) *>
+    [1;1;1] *> returned_core v *> [1;0;0;0;1;0;1] *> r).
 Proof.
-  induction n; cbn [repeat pushed_core pushed_bits]; [reflexivity |].
-  rewrite IHn, copies_succ_end; reflexivity.
+  replace (2*m+1) with (1+2*m) by lia. follow10 T_turn.
+  replace (2*m) with (m*2) by lia. cbn[Nat.add lpow].
+  rewrite Str_app_assoc,lpow_mul. cbn[lpow app].
+  rewrite half_slide. follow alternating_left.
+  replace (n+2) with (1+(1+n)) by lia.
+  cbn[Nat.add lpow]. rewrite Str_app_assoc.
+  follow100 odd_turn.
+  change ([1;0;1;1] *> [1;0;1;1]^^m *> [1;1;1] *>
+    returned_core (v++[Three]) *> [1;0;0;0;1] *> r)
+    with ([1;0;1;1]^^(1+m) *> [1] *>
+      [1;1] *> returned_core (v++[Three]) *> [1;0;0;0;1] *> r).
+  follow q_right.
+  rewrite returned_core_app. cbn[returned_core flat_map returned_bits app].
+  rewrite Str_app_assoc.
+  change ([1;0;1;1] *> [1;0;0;0;1] *> r)
+    with ([1;0] *> [1;1;1;0;0;0;1] *> r).
+  rewrite returned_rotation.
+  follow100 core_head.
+  rewrite half_slide. follow alternating_left. follow100 double_left.
+  change (0 >> 1 >> (0::1::0::1::[0;1;0;1]^^n) *>
+    [1;0;1;0;1] *> pushed_core w *> [0;1] *> 0inf)
+    with ([0;1] *> [0;1;0;1]^^(1+n) *>
+      [1;0;1;0;1] *> pushed_core w *> [0;1] *> 0inf).
+  rewrite half_slide. follow alternating_left. follow100 double_left. finish.
 Qed.
 
 Lemma half_six w b r :
-  advance (18*b+27)
-    (cfg D (S0::S1::pushed_core (w++Six::repeat Three b) ++ [S0;S1])
-      S1 (S1::S0::S0::S1::S1::r)) =
-  cfg D (S0::S1::pushed_core w ++ [S0;S1]) S1
-    ([S1;S0;S0;S1;S1] ++ copies b [S1;S0;S1;S1] ++
-      S1::S0::S0::S0::S1::S1::S1::r).
+  (D,([0;1] *> pushed_core (w++Six::[Three]^^b) *> [0;1] *> 0inf) {{1}}
+    [1;0;0;1;1] *> r) -->+
+  (D,([0;1] *> pushed_core w *> [0;1] *> 0inf) {{1}}
+    [1;0;0;1;1] *> [1;0;1;1]^^b *> [1;0;0;0;1;1;1] *> r).
 Proof.
-  rewrite pushed_core_app; cbn [pushed_core pushed_bits].
-  rewrite pushed_threes; repeat rewrite <- app_assoc; cbn [app].
-  replace (18*b+27) with (4*b+(4+(10*S b+(8+(4*b+5))))) by lia.
-  rewrite p_half_slide, advance_add, alternating_left, advance_add, odd_turn.
-  rewrite advance_add, q_right_succ.
-  cbn [copies app]; rewrite advance_add, d0reverse.
-  rewrite p_half_slide, advance_add, alternating_left, d1double; reflexivity.
+  rewrite pushed_core_app. cbn[pushed_core pushed_bits].
+  rewrite pushed_threes,!Str_app_assoc.
+  sweep1 b (pushed_core w *> [0;1] *> 0inf) r.
 Qed.
 
 Fixpoint row a gaps := match gaps with
-  | [] => repeat Three a
-  | b::gaps => row a gaps ++ Six::repeat Three b end.
-Fixpoint packet gaps r := match gaps with
-  | [] => r
-  | b::gaps => packet gaps (copies b [S1;S0;S1;S1] ++
-      S1::S0::S0::S0::S1::S1::S1::r) end.
-Fixpoint row_clock a gaps := match gaps with
-  | [] => 4*a+7
-  | b::gaps => 18*b+27+row_clock a gaps end.
+  [] => [Three]^^a | b::gaps => row a gaps ++ Six::[Three]^^b end.
+Fixpoint packet gaps (r:side) := match gaps with
+  [] => r | b::gaps => packet gaps ([1;0;1;1]^^b *> [1;0;0;0;1;1;1] *> r) end.
+Fixpoint saved_pages gaps r := match gaps with
+  [] => r | b::gaps => saved_pages gaps (page ([Three]^^b) *> r) end.
 
 Lemma half_row a gaps r :
-  advance (row_clock a gaps)
-    (cfg D (S0::S1::pushed_core (row a gaps) ++ [S0;S1])
-      S1 (S1::S0::S0::S1::S1::r)) =
-  G a (S1::S1::packet gaps r).
+  (D,([0;1] *> pushed_core (row a gaps) *> [0;1] *> 0inf) {{1}}
+    [1;0;0;1;1] *> r) -->+ G a ([1;1] *> packet gaps r).
 Proof.
-  revert r; induction gaps as [|b gaps IH]; intro r.
-  - cbn [row row_clock packet]; rewrite pushed_threes.
-    rewrite p_half_slide.
-    change (advance (4*a+7) (cfg D
-      (copies a [S0;S1;S0;S1] ++ [S0;S1;S0;S1]) S1
-      (S1::S0::S0::S1::S1::r)) = G a (S1::S1::r)).
-    rewrite <- copies_succ_end.
-    replace (4*a+7) with (4*S a+3) by lia.
-    rewrite advance_add.
-    pose proof (alternating_left (S a) [] (S1::S0::S0::S1::S1::r)) as Hleft.
-    rewrite app_nil_r in Hleft; rewrite Hleft, empty_left.
-    unfold G; cbn [copies app].
-    rewrite rotate_head.
-    pose proof (copies_slide a [S1;S1;S1;S0] (S0::S1::S1::r)) as Hslide.
-    cbn [app] in Hslide; unfold Sym in *; rewrite Hslide; reflexivity.
-  - cbn [row row_clock packet].
-    rewrite advance_add, half_six.
-    cbn [app]; apply IH.
-Qed.
-
-Lemma T_core_odd_row a gaps n m v r :
-  advance (4*n+30*m+2*weight v+113+row_clock a gaps)
-    (tilted (row a gaps) n (core_suffix (2*m+1) (v++[Three]) r)) =
-  G a (S1::S1::packet gaps
-    (copies (S n) [S1;S0;S1;S1] ++
-     [S1;S0;S0;S1;S1] ++ copies (S m) [S1;S0;S1;S1] ++
-     S1::S1::S1::returned_core v ++
-     S1::S0::S0::S0::S1::S0::S1::r)).
-Proof.
-  rewrite advance_add, T_core_odd_turn.
-  cbn [app]; apply half_row.
+  gen r. induction gaps as [|b gaps IH]; intros.
+  - cbn[row packet]. rewrite pushed_threes. unfold G,U.
+    es' a & r.
+  - cbn[row packet]. follow11 half_six. apply IH.
 Qed.
 
 Lemma q_gap n r :
-  S1::S1::S1::copies (S n) [S1;S0;S1;S1] ++
-    S1::S0::S0::S1::S1::r =
-  [S1;S1;S1;S1;S0] ++ copies (S n) [S1;S1;S1;S0] ++
-    S0::S1::S1::r.
+  [1;1;1] *> [1;0;1;1]^^(1+n) *> [1;0;0;1;1] *> r =
+  [1;1;1;1;0] *> U^^(1+n) *> [0;1;1] *> r.
 Proof.
-  cbn [copies app]; rewrite rotate_head.
-  pose proof (copies_slide n [S1;S1;S1;S0] (S0::S1::S1::r)) as H.
-  cbn [app] in H; unfold Sym in *; rewrite H; repeat rewrite <- app_assoc; reflexivity.
+  change ([1;1;1] *> [1;0;1;1]^^(1+n) *> [1;0;0;1;1] *> r)
+    with ([1] *> ([1;1] *> [1;0;1;1]^^(1+n) *> [1;0;0;1;1] *> r)).
+  rewrite rotate_return. cbn[Nat.add lpow]. rewrite Str_app_assoc.
+  change ([1;1] *> [1;0;0;1;1] *> r) with (U *> [0;1;1] *> r).
+  rewrite lpow_shift'. reflexivity.
 Qed.
 
 Lemma q_packet n r :
-  S1::S1::S1::copies n [S1;S0;S1;S1] ++
-    S1::S0::S0::S0::S1::S1::S1::r =
-  page (repeat Three n) ++ S1::S1::S1::r.
+  [1;1;1] *> [1;0;1;1]^^n *> [1;0;0;0;1;1;1] *> r =
+  page ([Three]^^n) *> [1;1;1] *> r.
 Proof.
-  unfold page; rewrite core_bits_threes.
-  destruct n as [|n]; cbn [copies app]; [reflexivity |].
-  rewrite rotate_head.
-  pose proof (copies_slide n [S1;S1;S1;S0]
-    (S0::S0::S1::S1::S1::r)) as H.
-  cbn [app] in H; unfold Sym in *; rewrite H; repeat rewrite <- app_assoc; reflexivity.
+  unfold page. rewrite core_bits_threes,!Str_app_assoc.
+  change ([1;1;1] *> [1;0;1;1]^^n *> [1;0;0;0;1;1;1] *> r)
+    with ([1] *> ([1;1] *> [1;0;1;1]^^n *> [1;0;0;0;1;1;1] *> r)).
+  rewrite rotate_return.
+  change ([1;1] *> [1;0;0;0;1;1;1] *> r) with (U *> [0;0;1;1;1] *> r).
+  rewrite lpow_shift'. reflexivity.
 Qed.
 
-Fixpoint saved_pages gaps r := match gaps with
-  | [] => r
-  | b::gaps => saved_pages gaps (page (repeat Three b) ++ r) end.
-
 Lemma packet_pages gaps r :
-  S1::S1::S1::packet gaps r = saved_pages gaps (S1::S1::S1::r).
+  [1;1;1] *> packet gaps r = saved_pages gaps ([1;1;1] *> r).
 Proof.
-  revert r; induction gaps as [|b gaps IH]; intro r; cbn [packet saved_pages];
-    [reflexivity | rewrite IH, q_packet; reflexivity].
+  gen r. induction gaps; intros; cbn[packet saved_pages]; [reflexivity|].
+  rewrite IHgaps,q_packet. reflexivity.
 Qed.
 
 Lemma packet_app u v r : packet (u++v) r = packet v (packet u r).
-Proof. revert r; induction u; intro r; cbn; [reflexivity | rewrite IHu; reflexivity]. Qed.
+Proof. gen r. induction u; intros; cbn; [reflexivity|apply IHu]. Qed.
 
 Lemma packet_last gaps b r :
-  S1::S1::packet (gaps++[b]) r =
-  copies (S b) [S1;S1;S1;S0] ++ S0::S0::
-    saved_pages gaps (S1::S1::S1::r).
+  [1;1] *> packet (gaps++[b]) r =
+  U^^(1+b) *> [0;0] *> saved_pages gaps ([1;1;1] *> r).
 Proof.
-  rewrite packet_app; cbn [packet].
-  rewrite rotate_head.
-  pose proof (copies_slide b [S1;S1;S1;S0]
-    (S0::S0::S1::S1::S1::packet gaps r)) as H.
-  cbn [app] in H; unfold Sym in *; rewrite H; cbn [copies app].
-  rewrite packet_pages; reflexivity.
+  rewrite packet_app. cbn[packet]. rewrite rotate_return.
+  change ([1;1] *> [1;0;0;0;1;1;1] *> packet gaps r)
+    with (U *> [0;0] *> [1;1;1] *> packet gaps r).
+  rewrite lpow_shift',packet_pages. reflexivity.
 Qed.
 
-Definition saved_body n m v r := [S1;S1;S1;S1;S0] ++
-  copies (S n) [S1;S1;S1;S0] ++ S0::
-  copies (S m) [S1;S1;S1;S0] ++ [S1;S1;S1;S1;S1;S1;S0] ++
-  core_bits v ++ S0::S0::S1::S0::S1::r.
+Definition saved_body n m v r := [1;1;1;1;0] *> U^^(1+n) *> [0] *>
+  U^^(1+m) *> V *> core_bits v *> [0;0;1;0;1] *> r.
 
 Lemma saved_body_normal n m v r :
-  S1::S1::S1::(copies (S n) [S1;S0;S1;S1] ++
-    [S1;S0;S0;S1;S1] ++ copies (S m) [S1;S0;S1;S1] ++
-    S1::S1::S1::returned_core v ++
-    S1::S0::S0::S0::S1::S0::S1::r) = saved_body n m v r.
+  [1;1;1] *> [1;0;1;1]^^(1+n) *>
+  [1;0;0;1;1] *> [1;0;1;1]^^(1+m) *>
+  [1;1;1] *> returned_core v *> [1;0;0;0;1;0;1] *> r = saved_body n m v r.
 Proof.
-  cbn [app]; rewrite q_gap.
-  unfold saved_body; cbn [app].
-  rewrite rotate_head, returned_rotation; reflexivity.
+  rewrite q_gap. unfold saved_body.
+  change ([0;1;1] *> [1;0;1;1]^^(1+m) *>
+    [1;1;1] *> returned_core v *> [1;0;0;0;1;0;1] *> r)
+    with ([0] *> [1;1] *> [1;0;1;1]^^(1+m) *>
+      [1;1;1] *> returned_core v *> [1;0;0;0;1;0;1] *> r).
+  rewrite rotate_return.
+  change ([1;0;0;0;1;0;1] *> r) with ([1;0] *> [0;0;1;0;1] *> r).
+  rewrite returned_rotation. reflexivity.
 Qed.
 
-Definition paired_frontier a b r := G a
-  (copies (S b) [S1;S1;S1;S0] ++ S0::S0::r).
-
-Lemma T_core_odd_frontier a b gaps n m v r :
-  advance (4*n+30*m+2*weight v+113+row_clock a (gaps++[b]))
-    (tilted (row a (gaps++[b])) n (core_suffix (2*m+1) (v++[Three]) r)) =
-  paired_frontier a b (saved_pages gaps (saved_body n m v r)).
+Lemma T_odd_frontier a b gaps n m v r :
+  tilted (row a (gaps++[b])) n (core_suffix (2*m+1) (v++[Three]) r) -->+
+  counter_pair (1+a) (1+b) (saved_pages gaps (saved_body n m v r)).
 Proof.
-  rewrite T_core_odd_row, packet_last, saved_body_normal; reflexivity.
+  follow10 T_odd_turn.
+  eapply evstep_trans; [apply progress_evstep,half_row|].
+  rewrite packet_last,saved_body_normal. finish.
 Qed.
 
-Lemma returned_threes n : returned_core (repeat Three n) =
-  copies n [S1;S0;S1;S1].
-Proof. induction n; cbn; [reflexivity | rewrite IHn; reflexivity]. Qed.
+Lemma J_even n k b r :
+  J n ([0;1]^^(2*k+2) *> U^^(b+4) *> [0;0] *> r) -->+
+  W (Six::[Three]^^(n+2)++Six::[Three]^^k++Six::[Three]^^b)
+    ([0;1]^^3 *> [0] *> r).
+Proof.
+  unfold J,W.
+  repeat first [rewrite core_bits_app | rewrite core_bits_threes |
+    progress cbn[core_bits flat_map block_bits]].
+  rewrite !Str_app_assoc. unfold U,V.
+  replace (2*k+2) with (k*2+2) by lia. es' n k b & r.
+Qed.
 
-Lemma d1_pair l r :
-  advance 4 (cfg D (S0::S1::S0::S1::l) S1 r) =
-  cfg D l S1 (S1::S0::S1::S1::r).
-Proof. reflexivity. Qed.
+Lemma J_odd n k b r :
+  J n ([0;1]^^(2*k+1) *> U^^(b+4) *> [0;0] *> r) -->+
+  K 0 n (U^^(k+1) *> V *> U^^(b+1) *> [0;0;1;0;1;0] *> r).
+Proof.
+  unfold J,K,U,V. replace (2*k+1) with (k*2+1) by lia.
+  es' n k b & r.
+Qed.
+
+Lemma J_odd_mixed n k h b r :
+  J n ([0;1]^^(2*k+1) *> U^^(h+2) *> V *> U^^(b+2) *> [0;0] *> r) -->+
+  K 0 n (U^^(k+1) *> V *> U^^(h+1) *> V *> U^^b *> [0;0;1;0;1;0] *> r).
+Proof.
+  unfold J,K,U,V. replace (2*k+1) with (k*2+1) by lia.
+  es' n k h b & r.
+Qed.
+
+Lemma J_even_twice n k h j b r :
+  J n ([0;1]^^(2*k+2) *> U^^(h+2) *> V *> U^^j *> V *> U^^(b+3) *> [0;0] *> r) -->+
+  W (Six::[Three]^^(n+2)++Six::[Three]^^k++Six::[Three]^^(h+1)++
+      Six::[Three]^^j++Six::[Three]^^b) ([0;1]^^3 *> [0] *> r).
+Proof.
+  unfold J,W.
+  repeat first [rewrite core_bits_app | rewrite core_bits_threes |
+    progress cbn[core_bits flat_map block_bits]].
+  rewrite !Str_app_assoc. unfold U,V.
+  replace (2*k+2) with (k*2+2) by lia. es' n k h j b & r.
+Qed.
+
+Lemma pair_start a b r :
+  counter_pair (1+a) b r -->+ J (1+a) ([0;1]^^(1+a) *> U^^b *> [0;0] *> r).
+Proof. apply G_iter. Qed.
+
+Lemma paired_even k b r :
+  counter_pair (2*k+2) (b+4) r -->+
+  tilted ([Three]^^b++Six::[Three]^^(2*k+4)) k ([0;1]^^(b+3) *> [0] *> r).
+Proof.
+  replace (2*k+2) with (1+(2*k+1)) by lia. follow11 pair_start.
+  replace (1+(2*k+1)) with (2*k+2) by lia. follow11 J_even.
+  replace (2*k+2+2) with (2*k+4) by lia.
+  pose proof (W_multi_six (Six::[Three]^^(2*k+4)) k b ([0;1]^^3 *> [0] *> r)) as H.
+  repeat first [rewrite <- app_assoc in H | progress cbn[app] in H].
+  rewrite (@lpow_add _ b 3 [S0;S1]),Str_app_assoc. exact H.
+Qed.
+
+Definition odd_outer h := Six::[Three]^^(2*h+7)++Six::[Three]^^(h+1)++
+  Six::[Three]^^(h+1).
+
+Lemma paired_odd h b r :
+  counter_pair (2*h+3) (b+8) r -->+
+  tilted ([Three]^^b++odd_outer h) (h+1) ([0;1]^^(b+7) *> [0] *> r).
+Proof.
+  replace (2*h+3) with (1+(2*h+2)) by lia. follow11 pair_start.
+  replace (1+(2*h+2)) with (2*(h+1)+1) by lia.
+  replace (b+8) with ((b+4)+4) by lia. follow11 J_odd. follow11 K_iter.
+  rewrite Nat.add_0_r.
+  replace (1+(2*(h+1)+1)) with (2*h+4) by lia.
+  replace (h+1+1) with (h+2) by lia.
+  replace (b+4+1) with ((b+3)+2) by lia.
+  change ([0;0;1;0;1;0] *> r) with ([0;0] *> [1;0;1;0] *> r).
+  follow11 J_odd_mixed. follow11 K_iter. rewrite Nat.add_0_r.
+  replace (1+(2*h+4)) with (2*h+5) by lia.
+  replace (2*h+4) with (2*(h+1)+2) by lia.
+  replace (h+1+1) with (h+2) by lia.
+  change ([0;0;1;0;1;0] *> [1;0;1;0] *> r)
+    with ([0;0] *> [1;0;1;0;1;0;1;0] *> r).
+  follow11 J_even_twice.
+  replace (2*h+5+2) with (2*h+7) by lia.
+  change ([0;1]^^3 *> [0] *> [1;0;1;0;1;0;1;0] *> r)
+    with ([0;1]^^7 *> [0] *> r).
+  pose proof (W_multi_six (odd_outer h) (h+1) b ([0;1]^^7 *> [0] *> r)) as H.
+  unfold odd_outer in *.
+  repeat first [rewrite <- app_assoc in H | progress cbn[app] in H].
+  rewrite (@lpow_add _ b 7 [S0;S1]),Str_app_assoc. exact H.
+Qed.
+
+Ltac sweep3 a b c l r :=
+  try rewrite !tl_const;
+  cbn[Str_app app];
+  let l := eval cbn[Str_app app] in l in
+  let r := eval cbn[Str_app app] in r in
+  es_v3_nmp_smp
+    (fun s => if (s=?"a")%string then a else if (s=?"b")%string then b
+      else if (s=?"c")%string then c else O)
+    (fun s => if (s=?"l")%string then l else if (s=?"r")%string then r else 0inf).
 
 Definition short_page_suffix m c r := core_suffix (2*m+1) []
-  ([S0;S1;S1;S1;S1;S0] ++ copies (c+2) [S1;S1;S1;S0] ++ S0::r).
+  ([0;1;1;1;1;0] *> U^^(c+2) *> [0] *> r).
 
 Lemma T_short_page_turn w n m c r :
-  advance (4*n+58*m+28*c+293) (tilted w (S n) (short_page_suffix m c r)) =
-  cfg D (S0::S1::pushed_core w ++ [S0;S1]) S1
-    ([S1;S0;S0;S1;S1] ++ copies (S n) [S1;S0;S1;S1] ++
-     [S1;S0;S0;S1;S1] ++ copies (S (m+2)) [S1;S0;S1;S1] ++
-     S1::S1::S1::returned_core (Six::repeat Three c) ++
-     S1::S0::S0::S0::S1::S0::S1::r).
+  tilted w (1+n) (short_page_suffix m c r) -->+
+  (D,([0;1] *> pushed_core w *> [0;1] *> 0inf) {{1}}
+    [1;0;0;1;1] *> [1;0;1;1]^^(1+n) *>
+    [1;0;0;1;1] *> [1;0;1;1]^^(1+(m+2)) *>
+    [1;1;1] *> returned_core (Six::[Three]^^c) *> [1;0;0;0;1;0;1] *> r).
 Proof.
-  unfold short_page_suffix.
-  replace (4*n+58*m+28*c+293) with
-    ((30*m+77)+(10*(m+2)+(8+(7+(6+((weight (repeat Three (S c))+30)+
-      (4+(3+(4*(m+2)+(4+(10*(m+3)+((weight (Six::repeat Three c)+30)+
-      (4*(m+3)+(5+(4*S n+5))))))))))))))) by
-    (change (weight (Six::repeat Three c)) with (weight ([Six]++repeat Three c));
-     rewrite weight_app, !weight_threes;
-     assert (weight [Six]=26) by reflexivity; nia).
-  rewrite advance_add, T_short_turn.
-  unfold short_frame; cbn [app].
-  rewrite advance_add, triple_right, advance_add, d0four, advance_add, d001.
-  rewrite advance_add, d0101.
-  replace (c+2) with (S c+1) by lia.
-  rewrite (copies_add (S c) 1 [S1;S1;S1;S0]).
-  rewrite <- core_bits_threes; cbn [copies app].
-  repeat rewrite <- app_assoc; cbn [app].
-  rewrite advance_add, core_turn_head.
-  rewrite advance_add, d1_pair.
-  rewrite advance_add, d1gap, p_half_slide.
-  rewrite advance_add, alternating_left, advance_add, odd_turn.
-  replace (m+3) with (S (m+2)) by lia.
-  rewrite advance_add, q_right_succ.
-  rewrite returned_threes; cbn [copies app].
-  rewrite rotate_head.
-  rewrite <- core_bits_threes.
-  pose proof (core_turn_head (Six::repeat Three c)) as Hturn.
-  cbn [core_bits block_bits app] in Hturn.
-  rewrite advance_add, Hturn.
-  rewrite p_half_slide, advance_add.
-  rewrite alternating_left_succ, advance_add, d1double.
-  rewrite p_half_slide, advance_add, alternating_left_succ, d1double.
-  reflexivity.
-Qed.
-
-Lemma T_short_page_row a gaps n m c r :
-  advance (4*n+58*m+28*c+293+row_clock a gaps)
-    (tilted (row a gaps) (S n) (short_page_suffix m c r)) =
-  G a (S1::S1::packet gaps
-    (copies (S n) [S1;S0;S1;S1] ++
-     [S1;S0;S0;S1;S1] ++ copies (S (m+2)) [S1;S0;S1;S1] ++
-     S1::S1::S1::returned_core (Six::repeat Three c) ++
-     S1::S0::S0::S0::S1::S0::S1::r)).
-Proof.
-  rewrite advance_add, T_short_page_turn; cbn [app]; apply half_row.
+  unfold tilted,short_page_suffix,core_suffix.
+  cbn[core_bits flat_map block_bits returned_core returned_bits].
+  rewrite returned_threes,!Str_app_assoc. unfold U.
+  replace (2*m+1) with (m*2+1) by lia.
+  sweep3 n m c (pushed_core w *> [0;1] *> 0inf) r.
 Qed.
 
 Lemma T_short_page_frontier a b gaps n m c r :
-  advance (4*n+58*m+28*c+293+row_clock a (gaps++[b]))
-    (tilted (row a (gaps++[b])) (S n) (short_page_suffix m c r)) =
-  paired_frontier a b (saved_pages gaps (saved_body n (m+2) (Six::repeat Three c) r)).
+  tilted (row a (gaps++[b])) (1+n) (short_page_suffix m c r) -->+
+  counter_pair (1+a) (1+b)
+    (saved_pages gaps (saved_body n (m+2) (Six::[Three]^^c) r)).
 Proof.
-  rewrite T_short_page_row, packet_last, saved_body_normal; reflexivity.
+  follow10 T_short_page_turn.
+  eapply evstep_trans; [apply progress_evstep,half_row|].
+  rewrite packet_last,saved_body_normal. finish.
 Qed.
 
-Definition counter_pair a b r := cfg D [] S0
-  ([S1;S1;S1;S1;S0] ++ copies a [S1;S1;S1;S0] ++
-   S0::copies b [S1;S1;S1;S0] ++ S0::S0::r).
-
-Lemma mixed_threes b : core_bits (mixed_word (repeat Three b)) =
-  copies (b+4) [S1;S1;S1;S0].
+Lemma positive_page_form p c r :
+  core_suffix (1+p) ([Three]^^c) r =
+  [0;1]^^p *> [0;1;1;1;1;0] *> U^^(1+c) *> [0] *> r.
 Proof.
-  unfold mixed_word; cbn [core_bits block_bits].
-  rewrite core_bits_app, core_bits_threes.
-  replace (b+4) with (2+(b+2)) by lia.
-  rewrite (copies_add 2 (b+2) [S1;S1;S1;S0]).
-  rewrite (copies_add b 2 [S1;S1;S1;S0]).
-  cbn [copies core_bits block_bits app].
-  repeat rewrite <- app_assoc; reflexivity.
+  unfold core_suffix. replace (1+p) with (p+1) by lia.
+  rewrite (@lpow_add _ p 1 [S0;S1]).
+  cbn[core_bits flat_map block_bits]. rewrite core_bits_app,core_bits_threes.
+  cbn[core_bits flat_map block_bits Nat.add lpow app].
+  rewrite !Str_app_assoc.
+  change ((U++[]) *> [0] *> r) with (U *> [0] *> r).
+  rewrite (@lpow_shift' _ c U). reflexivity.
 Qed.
 
-Definition bridge_core n k b := repeat Three n ++ Six::repeat Three k ++ Six::repeat Three b.
-
-Lemma bridge_weight n k b : weight (bridge_core n k b) = 14*n+14*k+14*b+52.
-Proof.
-  unfold bridge_core.
-  change (weight (repeat Three n++[Six]++repeat Three k++[Six]++repeat Three b) = 14*n+14*k+14*b+52).
-  rewrite !weight_app, !weight_threes.
-  assert (weight [Six]=26) by reflexivity; lia.
-Qed.
-
-Lemma bridge_B n k b r :
-  advance (14*n+14*k+14*b+112)
-    (J 0 (copies (S n) [S1;S1;S1;S0] ++
-      [S1;S1;S1;S1;S1;S1;S0] ++ copies k [S1;S1;S1;S0] ++
-      [S1;S1;S1;S1;S1;S1;S0] ++ copies (S b) [S1;S1;S1;S0] ++
-      S0::S0::r)) =
-  W (Six::repeat Three (n+2) ++ Six::repeat Three k ++ Six::repeat Three b)
-    (S0::S1::S0::r).
-Proof.
-  pose proof (B_transfer (bridge_core n k b) r) as H.
-  rewrite bridge_weight in H.
-  replace (14*n+14*k+14*b+52+60) with (14*n+14*k+14*b+112) in H by lia.
-  unfold bridge_core in H.
-  repeat first [rewrite core_bits_app in H | rewrite core_bits_threes in H |
-    progress cbn [core_bits block_bits app] in H | rewrite <- app_assoc in H].
-  rewrite (copies_succ_end b [S1;S1;S1;S0]).
-  replace (n+2) with (S (S n)) by lia.
-  cbn [repeat copies app].
-  repeat first [rewrite <- app_assoc in * | progress cbn [app] in *]; exact H.
-Qed.
-
-Lemma J_even_threes_bridge n k b r :
-  advance (42*n+44*k+42*b+328)
-    (J n (mixed_suffix (2*k+2) (repeat Three b) r)) =
-  W (Six::repeat Three (n+2) ++ Six::repeat Three k ++ Six::repeat Three b)
-    (copies 3 [S0;S1] ++ S0::r).
-Proof.
-  replace (42*n+44*k+42*b+328) with
-    ((28*n+30*k+2*weight (repeat Three b)+197)+(19+(14*n+14*k+14*b+112))) by
-    (rewrite weight_threes; nia).
-  rewrite advance_add, J_mixed_even.
-  unfold mixed_even_result; cbn [app].
-  rewrite advance_add, double_zero_frontier.
-  cbn [core_bits block_bits]; rewrite core_bits_threes.
-  change (advance (14*n+14*k+14*b+112)
-    (J 0 (copies (S n) [S1;S1;S1;S0] ++
-      [S1;S1;S1;S1;S1;S1;S0] ++ copies k [S1;S1;S1;S0] ++
-      [S1;S1;S1;S1;S1;S1;S0] ++ copies (S b) [S1;S1;S1;S0] ++
-      S0::S0::S1::S0::S1::S0::r)) =
-    W (Six::repeat Three (n+2) ++ Six::repeat Three k ++ Six::repeat Three b)
-      (copies 3 [S0;S1] ++ S0::r)).
-  rewrite bridge_B; reflexivity.
-Qed.
-
-Lemma paired_even k b r :
-  advance (56*k*k+352*k+687+b*(42*k+14*b+194))
-    (counter_pair (2*k+2) (b+4) r) =
-  tilted (repeat Three b ++ Six::repeat Three (2*k+4)) k
-    (copies (b+3) [S0;S1] ++ S0::r).
-Proof.
-  replace (counter_pair (2*k+2) (b+4) r) with
-    (G (2*k+1) (copies (b+4) [S1;S1;S1;S0] ++ S0::S0::r)) by
-    (unfold counter_pair, G; replace (S (2*k+1)) with (2*k+2) by lia; reflexivity).
-  replace (56*k*k+352*k+687+b*(42*k+14*b+194)) with
-    (((2*k+1+2)*(14*(2*k+1)+34)-1)+
-     ((42*(2*k+2)+44*k+42*b+328)+
-      (b*(weight (Six::repeat Three (2*k+4))+14*(k+b)+60)+
-       right_clock (Six::repeat Three (2*k+4))+10*b+24*k+73))) by
-    (change (weight (Six::repeat Three (2*k+4))) with (weight ([Six]++repeat Three (2*k+4)));
-     change (right_clock (Six::repeat Three (2*k+4))) with (right_clock ([Six]++repeat Three (2*k+4)));
-     rewrite weight_app, weight_threes, right_clock_app, right_clock_threes;
-     assert (weight [Six]=26) by reflexivity; assert (right_clock [Six]=19) by reflexivity; nia).
-  rewrite advance_add, G_phase.
-  replace (S (2*k+1)) with (2*k+2) by lia.
-  rewrite <- mixed_threes.
-  match goal with |- advance ?clock _ = ?result =>
-    change (advance clock (J (2*k+2) (mixed_suffix (2*k+2) (repeat Three b) r)) = result)
-  end.
-  rewrite advance_add, J_even_threes_bridge.
-  replace (2*k+2+2) with (2*k+4) by lia.
-  pose proof (W_multi_six_phase (Six::repeat Three (2*k+4)) k b
-    (copies 3 [S0;S1] ++ S0::r)) as H.
-  repeat first [rewrite <- app_assoc in H | progress cbn [app] in H].
-  rewrite copies_add; repeat rewrite <- app_assoc; exact H.
-Qed.
-
-Lemma mixed_cuts p a v b r :
-  mixed_suffix p (repeat Three a++v++repeat Three b) r =
-  copies p [S0;S1] ++ copies (a+2) [S1;S1;S1;S0] ++
-    core_bits v ++ copies (b+2) [S1;S1;S1;S0] ++ S0::S0::r.
-Proof.
-  unfold mixed_suffix, mixed_word.
-  repeat first [rewrite core_bits_app | rewrite core_bits_threes |
-    progress cbn [core_bits block_bits app] | rewrite <- app_assoc].
-  rewrite (copies_add b 2 [S1;S1;S1;S0]).
-  replace (a+2) with (2+a) by lia.
-  cbn [copies app].
-  repeat first [rewrite <- app_assoc | progress cbn [app]]; reflexivity.
-Qed.
-
-Lemma bridge_B_general n k v b r :
-  advance (14*n+14*k+weight v+14*b+126)
-    (J 0 (copies (S n) [S1;S1;S1;S0] ++
-      [S1;S1;S1;S1;S1;S1;S0] ++ copies k [S1;S1;S1;S0] ++
-      [S1;S1;S1;S1;S1;S1;S0] ++ core_bits (Three::v) ++
-      copies (S b) [S1;S1;S1;S0] ++ S0::S0::r)) =
-  W (Six::repeat Three (n+2) ++ Six::repeat Three k ++ Six::Three::v++repeat Three b)
-    (S0::S1::S0::r).
-Proof.
-  pose proof (B_transfer (repeat Three n ++ Six::repeat Three k ++
-    Six::Three::v++repeat Three b) r) as H.
-  assert (Hweight : weight (repeat Three n ++ Six::repeat Three k ++
-    Six::Three::v++repeat Three b) = 14*n+14*k+weight v+14*b+66).
-  { change (weight (repeat Three n++[Six]++repeat Three k++[Six;Three]++v++repeat Three b) =
-      14*n+14*k+weight v+14*b+66).
-    rewrite !weight_app, !weight_threes.
-    assert (weight [Six]=26) by reflexivity; assert (weight [Six;Three]=40) by reflexivity; lia. }
-  rewrite Hweight in H.
-  replace (14*n+14*k+weight v+14*b+66+60) with
-    (14*n+14*k+weight v+14*b+126) in H by lia.
-  repeat first [rewrite core_bits_app in H | rewrite core_bits_threes in H |
-    progress cbn [core_bits block_bits app] in H | rewrite <- app_assoc in H].
-  rewrite (copies_succ_end b [S1;S1;S1;S0]).
-  replace (n+2) with (S (S n)) by lia.
-  cbn [repeat copies core_bits block_bits app].
-  repeat first [rewrite <- app_assoc in * | progress cbn [app] in *]; exact H.
-Qed.
-
-Lemma J_even_general_bridge n k v b r :
-  advance (42*n+44*k+3*weight v+42*b+370)
-    (J n (mixed_suffix (2*k+2) (v++repeat Three (S b)) r)) =
-  W (Six::repeat Three (n+2) ++ Six::repeat Three k ++ Six::Three::v++repeat Three b)
-    (copies 3 [S0;S1] ++ S0::r).
-Proof.
-  replace (42*n+44*k+3*weight v+42*b+370) with
-    ((28*n+30*k+2*weight (v++repeat Three (S b))+197)+
-      (19+(14*n+14*k+weight v+14*b+126))) by
-    (rewrite weight_app, weight_threes; nia).
-  rewrite advance_add, J_mixed_even.
-  unfold mixed_even_result; cbn [app].
-  rewrite advance_add, double_zero_frontier.
-  cbn [core_bits block_bits]; rewrite core_bits_app, core_bits_threes.
-  pose proof (bridge_B_general n k v b (S1::S0::S1::S0::r)) as H.
-  cbn [core_bits block_bits app] in H.
-  repeat first [rewrite <- app_assoc in * | progress cbn [app] in *]; exact H.
-Qed.
-
-Definition odd_middle h b := repeat Three h ++ Six::repeat Three (b+3).
-Definition odd_bridge h := repeat Three h ++ Six::repeat Three (h+1) ++ [Six].
-Definition odd_outer h := Six::repeat Three (2*h+7) ++
-  Six::repeat Three (h+1) ++ Six::repeat Three (h+1).
-
-Lemma odd_weights h b :
-  weight (odd_middle h b)=14*h+14*b+68 /\
-  weight (odd_bridge h)=28*h+66 /\
-  weight (odd_outer h)=56*h+204 /\ right_clock (odd_outer h)=40*h+147.
-Proof.
-  unfold odd_middle, odd_bridge, odd_outer.
-  change (weight (repeat Three h++[Six]++repeat Three (b+3))=14*h+14*b+68 /\
-    weight (repeat Three h++[Six]++repeat Three (h+1)++[Six])=28*h+66 /\
-    weight ([Six]++repeat Three (2*h+7)++[Six]++repeat Three (h+1)++[Six]++repeat Three (h+1))=56*h+204 /\
-    right_clock ([Six]++repeat Three (2*h+7)++[Six]++repeat Three (h+1)++[Six]++repeat Three (h+1))=40*h+147).
-  rewrite !weight_app, !weight_threes, !right_clock_app, !right_clock_threes.
-  assert (weight [Six]=26) by reflexivity; assert (right_clock [Six]=19) by reflexivity.
-  repeat split; lia.
-Qed.
-
-Lemma paired_odd h b r :
-  advance (168*(h+1)*(h+1)+904*(h+1)+1723+b*(70*(h+1)+14*b+316))
-    (counter_pair (2*h+3) (b+8) r) =
-  tilted (repeat Three b ++ odd_outer h) (h+1)
-    (copies (b+7) [S0;S1] ++ S0::r).
-Proof.
-  replace (counter_pair (2*h+3) (b+8) r) with
-    (G (2*h+2) (copies (b+8) [S1;S1;S1;S0] ++ S0::S0::r)) by
-    (unfold counter_pair, G; replace (S (2*h+2)) with (2*h+3) by lia; reflexivity).
-  replace (168*(h+1)*(h+1)+904*(h+1)+1723+b*(70*(h+1)+14*b+316)) with
-    (((2*h+2+2)*(14*(2*h+2)+34)-1)+
-     ((14*(2*h+3)+30*(h+1)+2*weight (repeat Three (b+4))+162)+
-      (phase_clock 0 (2*h+3)+
-       ((14*(2*h+4)+30*(h+1)+2*weight (odd_middle h b)+162)+
-        (phase_clock 0 (2*h+4)+
-         ((42*(2*h+5)+44*(h+1)+3*weight (odd_bridge h)+42*b+370)+
-          (b*(weight (odd_outer h)+14*(h+1+b)+60)+right_clock (odd_outer h)+10*b+24*(h+1)+73))))))) by
-    (destruct (odd_weights h b) as [H1 [H2 [H3 H4]]];
-     rewrite H1,H2,H3,H4,weight_threes; unfold phase_clock; nia).
-  rewrite advance_add, G_phase.
-  replace (S (2*h+2)) with (2*h+3) by lia.
-  replace (b+8) with (b+4+4) by lia; rewrite <- mixed_threes.
-  match goal with |- advance ?clock _ = ?result =>
-    change (advance clock (J (2*h+3) (mixed_suffix (2*h+3) (repeat Three (b+4)) r)) = result)
-  end.
-  replace (2*h+3) with (2*(h+1)+1) by lia.
-  rewrite advance_add, J_mixed_odd, advance_add, K_phase.
-  replace (0+(2*(h+1)+1)+1) with (2*h+4) by lia.
-  pose proof (mixed_cuts (2*(h+1)+1) h [Six] (b+3)
-    (S1::S0::S1::S0::r)) as Hfirst.
-  change (repeat Three h++[Six]++repeat Three (b+3)) with (odd_middle h b) in Hfirst.
-  replace (h+2) with (S (h+1)) in Hfirst by lia.
-  replace (b+3+2) with (S (b+4)) in Hfirst by lia.
-  cbn [core_bits block_bits app] in *; rewrite core_bits_threes.
-  cbn [copies app] in Hfirst.
-  cbn [copies app].
-  repeat rewrite <- app_assoc.
-  unfold Sym in *; rewrite <- Hfirst.
-  rewrite advance_add, J_mixed_odd, advance_add, K_phase.
-  clear Hfirst.
-  replace (0+(2*h+4)+1) with (2*h+5) by lia.
-  pose proof (mixed_cuts (2*(h+1)+2) h
-    (Six::repeat Three (h+1)++[Six]) (b+1)
-    (S1::S0::S1::S0::S1::S0::S1::S0::r)) as Hsecond.
-  assert (Hlist : repeat Three h ++ (Six::repeat Three (h+1)++[Six]) ++ repeat Three (b+1) =
-    odd_bridge h ++ repeat Three (S b)).
-  { unfold odd_bridge; replace (b+1) with (S b) by lia.
-    repeat first [rewrite <- app_assoc | progress cbn [app]]; reflexivity. }
-  rewrite Hlist in Hsecond.
-  replace (h+2) with (S (h+1)) in Hsecond by lia.
-  replace (b+1+2) with (b+3) in Hsecond by lia.
-  replace (2*h+4) with (2*(h+1)+2) by lia.
-  unfold odd_middle.
-  repeat first [rewrite core_bits_app | rewrite core_bits_threes |
-    progress cbn [core_bits block_bits app] | rewrite <- app_assoc].
-  repeat first [rewrite core_bits_app in Hsecond | rewrite core_bits_threes in Hsecond |
-    progress cbn [core_bits block_bits app] in Hsecond | rewrite <- app_assoc in Hsecond].
-  replace (h+1) with (S h) in * by lia.
-  cbn [copies app] in *.
-  unfold Sym in *; rewrite <- Hsecond.
-  rewrite advance_add, J_even_general_bridge.
-  clear Hsecond Hlist.
-  pose proof (W_multi_six_phase (odd_outer h) (S h) b
-    (copies 7 [S0;S1] ++ S0::r)) as Hphase.
-  rewrite (copies_add b 7 [S0;S1]).
-  unfold odd_bridge, odd_outer in *.
-  replace (h+1) with (S h) in * by lia.
-  replace (2*h+5+2) with (2*h+7) by lia.
-  repeat first [rewrite <- app_assoc in * | progress cbn [repeat copies app] in *].
-  exact Hphase.
-Qed.
-
-Definition shield a b d r := counter_pair a b
-  (page (repeat Three (b/2-1)) ++ page (repeat Three d) ++ r).
-
-Definition shield28_tail :=
-  [S1;S1;S1;S1;S0] ++
-  copies 5 [S1;S1;S1;S0] ++
-  [S0;S0] ++
-  [S1;S1;S1;S1;S0] ++
-  [S1;S1;S1;S0] ++
-  [S0;S0] ++
-  [S1;S1;S1;S1;S0] ++
-  copies 2 [S1;S1;S1;S0] ++
-  [S0;S0] ++
-  [S1;S1;S1;S1;S0] ++
-  [S1;S1;S1;S0] ++
-  [S0;S0] ++
-  [S1;S1;S1;S1;S0] ++
-  copies 3 [S1;S1;S1;S0] ++
-  [S0;S0] ++
-  [S1;S1;S1;S1;S0] ++
-  copies 4 [S1;S1;S1;S0] ++
-  [S0] ++
-  copies 2 [S1;S1;S1;S0] ++
-  [S1;S1;S1;S1;S1;S1;S0] ++
-  copies 2 [S1;S1;S1;S0] ++
-  [S1;S1;S1;S1;S1;S1;S0] ++
-  copies 5 [S1;S1;S1;S0] ++
-  [S1;S1;S1;S1;S1;S1;S0] ++
-  copies 2 [S1;S1;S1;S0] ++
-  [S0;S0;S1;S0;S1] ++
-  [S0;S1;S0;S1] ++
-  [S0] ++
-  copies 2 [S1;S0] ++
-  [S1;S0;S0;S1;S0;S1] ++
-  [].
-
-Definition shield59_tail r :=
-  [S1;S1;S1;S1;S0] ++
-  copies 7 [S1;S1;S1;S0] ++
-  [S0] ++
-  copies 13 [S1;S1;S1;S0] ++
-  [S1;S1;S1;S1;S1;S1;S0] ++
-  copies 11 [S1;S1;S1;S0] ++
-  [S1;S1;S1;S1;S1;S1;S0] ++
-  copies 17 [S1;S1;S1;S0] ++
-  [S0;S0;S1;S0;S1] ++
-  [S0;S1;S0;S1] ++
-  [S0] ++
-  [S1;S1;S1;S1;S0] ++
-  copies 23 [S1;S1;S1;S0] ++
-  [S0;S0] ++
-  [S1;S1;S1;S1;S0] ++
-  copies 7 [S1;S1;S1;S0] ++
-  [S0;S0] ++
-  [S1;S1;S1;S1;S0] ++
-  copies 3 [S1;S1;S1;S0] ++
-  [S0] ++
-  copies 9 [S1;S1;S1;S0] ++
-  [S1;S1;S1;S1;S1;S1;S0] ++
-  copies 6 [S1;S1;S1;S0] ++
-  [S0;S0;S1;S0;S1] ++
-  copies 3 [S1;S1;S1;S0] ++
-  [S1;S1;S1;S1;S1;S1;S0] ++
-  copies 2 [S1;S1;S1;S0] ++
-  [S1;S1;S1;S1;S1;S1;S0] ++
-  copies 3 [S1;S1;S1;S0] ++
-  [S0;S0;S1;S0;S1] ++
-  [S0;S1;S0;S1] ++
-  [S0] ++
-  r.
-
-Lemma blank_to_shield64259 : advance 64259 blank =
-  shield 28 10 7 shield28_tail.
-Proof. vm_compute; reflexivity. Qed.
-
-Lemma shield28_to59 r : advance 553376 (shield 28 10 7 r) =
-  shield 59 70 14 (shield59_tail r).
-Proof. vm_compute; reflexivity. Qed.
-
-Definition qright x r := [S1;S1;S1;S1;S0] ++
-  copies (2*x+2) [S1;S1;S1;S0] ++ S0::r.
-
+Definition qright x r := [1;1;1;1;0] *> U^^(2*x+2) *> [0] *> r.
 Definition Qfront x y r := counter_pair (6*x+2) (2*y+4)
-  (page (repeat Three (y+2)) ++ qright x r).
-
-Definition qframe x z r := copies (z+2) [S1;S1;S1;S0] ++
-  [S1;S1;S1;S1;S1;S1;S0] ++
-  copies (2*x) [S1;S1;S1;S0] ++ [S0;S0;S1;S0;S1] ++ r.
-
-Definition qclock x z := 504*x*x+756*x*z+448*z*z+1442*x+1498*z+1414.
-Definition qleft x z := repeat Three (4*z) ++ Six::repeat Three (6*x+3).
-
-Lemma qleft_weight x z : weight (qleft x z) = 56*z+84*x+68.
-Proof.
-  unfold qleft.
-  change (weight (repeat Three (4*z)++[Six]++repeat Three (6*x+3))=56*z+84*x+68).
-  rewrite !weight_app, !weight_threes.
-  assert (weight [Six]=26) by reflexivity; lia.
-Qed.
+  (page ([Three]^^(y+2)) *> qright x r).
+Definition qframe x z r := U^^(z+2) *> V *> U^^(2*x) *> [0;0;1;0;1] *> r.
+Definition qleft x z := [Three]^^(4*z)++Six::[Three]^^(6*x+3).
 
 Lemma qleft_input x z :
-  repeat Three (4*z) ++ Six::repeat Three (2*(3*x)+4) = qleft x z++[Three].
+  [Three]^^(4*z)++Six::[Three]^^(2*(3*x)+4) = qleft x z++[Three].
 Proof.
-  unfold qleft; replace (2*(3*x)+4) with (S (6*x+3)) by lia.
-  rewrite threes_succ_end; repeat rewrite <- app_assoc; reflexivity.
+  unfold qleft. replace (2*(3*x)+4) with ((6*x+3)+1) by lia.
+  rewrite lpow_add.
+  repeat first [rewrite <- app_assoc | progress cbn[app]]. reflexivity.
 Qed.
 
 Lemma qleft_output x z :
-  repeat Three (2*z+2-1) ++ qleft x z ++ Six::repeat Three (3*x+2) =
-  row (6*z+1) [3*x+2;6*x+3].
+  [Three]^^(2*z+1)++qleft x z++Six::[Three]^^(3*x+2) = row (6*z+1) [3*x+2;6*x+3].
 Proof.
-  unfold qleft; cbn [row].
-  replace (2*z+2-1) with (2*z+1) by lia.
-  replace (6*z+1) with ((2*z+1)+4*z) by lia.
-  rewrite (repeat_app Three (2*z+1) (4*z)).
-  repeat first [rewrite <- app_assoc | progress cbn [app]]; reflexivity.
+  unfold qleft. cbn[row]. replace (6*z+1) with ((2*z+1)+4*z) by lia.
+  rewrite (@lpow_add _ (2*z+1) (4*z) [Three]).
+  repeat first [rewrite <- app_assoc | progress cbn[app]]. reflexivity.
 Qed.
 
 Lemma qright_core m x r :
-  copies (2*m) [S0;S1] ++ S0::qright x r =
-  core_suffix (2*m+1) (repeat Three (2*x)++[Three]) r.
+  [0;1]^^(2*m) *> [0] *> qright x r =
+  core_suffix (2*m+1) ([Three]^^(2*x)++[Three]) r.
 Proof.
-  replace (2*m+1) with (S (2*m)) by lia.
-  rewrite <- threes_succ_end, positive_page_form.
-  unfold qright; replace (S (S (2*x))) with (2*x+2) by lia.
-  repeat rewrite <- app_assoc; reflexivity.
+  replace (2*m+1) with (1+2*m) by lia.
+  rewrite lpow_shift. change ([Three]++[Three]^^(2*x)) with ([Three]^^(1+2*x)).
+  rewrite positive_page_form. unfold qright.
+  replace (1+(1+2*x)) with (2*x+2) by lia. reflexivity.
 Qed.
 
-Lemma Q_push x z r :
-  advance (qclock x z) (Qfront x (2*z) r) = Qfront z (3*x) (qframe x z r).
+Lemma Q_push x z r : Qfront x (2*z) r -->+ Qfront z (3*x) (qframe x z r).
 Proof.
   unfold Qfront at 1.
   replace (6*x+2) with (2*(3*x)+2) by lia.
-  replace (2*(2*z)+4) with (4*z+4) by lia.
-  replace (qclock x z) with
-    ((56*(3*x)*(3*x)+352*(3*x)+687+4*z*(42*(3*x)+14*(4*z)+194))+
-     (page_clock (qleft x z) (3*x) (2*z+1) (2*z+2)+
-      (4*(2*z+1)+30*(z+1)+2*weight (repeat Three (2*x))+113+
-       row_clock (6*z+1) ([3*x+2]++[6*x+3])))) by
-    (unfold qclock, page_clock; rewrite qleft_weight, weight_threes;
-     cbn [row_clock app]; replace (2*z+2-1) with (2*z+1) by lia; nia).
-  rewrite advance_add, paired_even, qleft_input.
-  replace (4*z+3) with (2*(2*z+1)+1) by lia.
-  assert (Hpage : S0::page (repeat Three (2*z+2)) ++ qright x r =
-    [S0;S1;S1;S1;S1;S0] ++ copies (2*z+2) [S1;S1;S1;S0] ++
-      S0::S0::qright x r).
-  { unfold page; rewrite core_bits_threes; repeat rewrite <- app_assoc; reflexivity. }
-  rewrite Hpage, advance_add, T_positive_page by lia.
+  replace (2*(2*z)+4) with (4*z+4) by lia. follow11 paired_even.
+  rewrite qleft_input. replace (4*z+3) with (2*(2*z+1)+1) by lia.
+  unfold page. rewrite core_bits_threes,!Str_app_assoc.
+  change ([0] *> [1;1;1;1;0] *> U^^(2*z+2) *> [0;0] *> qright x r)
+    with ([0;1;1;1;1;0] *> U^^(2*z+2) *> [0] *> [0] *> qright x r).
+  replace (2*z+2) with (1+(2*z+1)) by lia. follow11 T_page.
   rewrite qleft_output.
-  replace (copies (2*z+2) [S0;S1]) with
-    (copies (2*(z+1)) [S0;S1]) by (f_equal; lia).
-  rewrite qright_core, (T_core_odd_frontier (6*z+1) (6*x+3) [3*x+2]).
-  unfold paired_frontier, counter_pair, G, Qfront, qright, qframe, saved_body.
-  cbn [saved_pages].
+  replace (1+(2*z+1)) with (2*(z+1)) by lia. rewrite qright_core.
+  follow10 (T_odd_frontier (6*z+1) (6*x+3) [3*x+2]).
+  unfold Qfront,qright,qframe,saved_body. cbn[saved_pages].
   rewrite core_bits_threes.
-  replace (S (6*z+1)) with (6*z+2) by lia.
-  replace (S (6*x+3)) with (2*(3*x)+4) by lia.
-  replace (S (2*z+1)) with (2*z+2) by lia.
-  replace (S (z+1)) with (z+2) by lia.
-  repeat first [rewrite <- app_assoc | progress cbn [app]]; reflexivity.
+  replace (1+(6*z+1)) with (6*z+2) by lia.
+  replace (1+(6*x+3)) with (2*(3*x)+4) by lia.
+  replace (1+(2*z+1)) with (2*z+2) by lia.
+  replace (1+(z+1)) with (z+2) by lia. finish.
 Qed.
 
-Inductive QRun : nat -> nat -> list Sym -> nat -> nat -> list Sym -> nat -> nat -> Prop :=
-| qrun_stop x k r : QRun x (2*k+1) r x (2*k+1) r 0 0
-| qrun_push x z r xf yf rf n t :
-    QRun z (3*x) (qframe x z r) xf yf rf n t ->
-    QRun x (2*z) r xf yf rf (S n) (qclock x z+t).
-
-Lemma Qrun_sound x y r xf yf rf n t : QRun x y r xf yf rf n t ->
-  advance t (Qfront x y r) = Qfront xf yf rf.
-Proof.
-  intro H; induction H; [reflexivity |].
-  rewrite advance_add, Q_push; exact IHQRun.
-Qed.
-
-Lemma positive_two_power n : 0<n -> exists a u, n=2^a*(2*u+1).
-Proof.
-  induction n as [n IH] using lt_wf_ind; intro Hn.
-  pose proof (Nat.div_mod n 2 ltac:(lia)) as Hdivide.
-  pose proof (Nat.mod_upper_bound n 2 ltac:(lia)) as Hmod.
-  assert (Hcases : n mod 2=0 \/ n mod 2=1) by lia.
-  destruct Hcases as [Heven|Hodd].
-  - assert (Hsmall : n/2<n) by (apply Nat.div_lt; lia).
-    assert (Hpositive : 0<n/2) by nia.
-    destruct (IH (n/2) Hsmall Hpositive) as [a [u Hu]].
-    exists (S a),u; repeat first [rewrite Nat.pow_succ_r' | rewrite Nat.pow_0_r]; nia.
-  - exists 0,(n/2); repeat first [rewrite Nat.pow_succ_r' | rewrite Nat.pow_0_r]; nia.
-Qed.
-
-Lemma Qrun_power_exit budget : forall a b u v r, a+b=budget ->
-  exists xf k rf n t,
-    QRun (2^a*(2*u+1)) (2^b*(2*v+1)) r xf (2*k+1) rf n t /\
-    n=Nat.min (2*b) (2*a+1) /\ 0<xf.
-Proof.
-  induction budget as [budget IH] using lt_wf_ind.
-  intros a b u v r Hbudget.
-  destruct b as [|b].
-  - exists (2^a*(2*u+1)),v,r,0,0.
-    split.
-    + replace (2^0*(2*v+1)) with (2*v+1) by (repeat first [rewrite Nat.pow_succ_r' | rewrite Nat.pow_0_r]; nia); constructor.
-    + split; [reflexivity |].
-      assert (Hpow : 2^a<>0) by (apply Nat.pow_nonzero; lia); nia.
-  - destruct (IH (b+a) ltac:(lia) b a v (3*u+1)
-      (qframe (2^a*(2*u+1)) (2^b*(2*v+1)) r) eq_refl)
-      as [xf [k [rf [n [t [Hrun [Hcount Hxf]]]]]]].
-    replace (2^a*(2*(3*u+1)+1)) with (3*(2^a*(2*u+1))) in Hrun by nia.
-    exists xf,k,rf,(S n),(qclock (2^a*(2*u+1)) (2^b*(2*v+1))+t).
-    split.
-    + replace (2^S b*(2*v+1)) with (2*(2^b*(2*v+1))) by (repeat first [rewrite Nat.pow_succ_r' | rewrite Nat.pow_0_r]; nia).
-      constructor; exact Hrun.
-    + split; [|exact Hxf].
-      rewrite Hcount; destruct (le_dec a b) as [Hab|Hab].
-      * rewrite (Nat.min_l (2*a) (2*b+1)) by lia.
-        rewrite (Nat.min_r (2*S b) (2*a+1)) by lia; lia.
-      * rewrite (Nat.min_r (2*a) (2*b+1)) by lia.
-        rewrite (Nat.min_l (2*S b) (2*a+1)) by lia; lia.
-Qed.
-
-Lemma Q_positive_phase_exit x y r : 0<x -> 0<y ->
-  exists xf k rf n t, QRun x y r xf (2*k+1) rf n t /\ 0<xf.
-Proof.
-  intros Hx Hy.
-  destruct (positive_two_power x Hx) as [a [u Hxu]].
-  destruct (positive_two_power y Hy) as [b [v Hyv]].
-  destruct (Qrun_power_exit (a+b) a b u v r eq_refl)
-    as [xf [k [rf [n [t [Hrun [Hcount Hxf]]]]]]].
-  exists xf,k,rf,n,t; rewrite Hxu,Hyv; auto.
-Qed.
-
-Definition callback_middle t b := repeat Three (t+2) ++ Six::repeat Three b.
+Definition callback_middle t b := [Three]^^(t+2)++Six::[Three]^^b.
 Definition callback_payload t b r :=
-  core_bits (Three::callback_middle t b++[Three;Three]) ++
-  [S0;S0;S1;S0;S1] ++ r.
-Definition callback_outer u n t :=
-  Three::u++Six::repeat Three (n+2)++Six::repeat Three (t+1).
-Definition callback_next u n t b :=
-  repeat Three (b+1)++u++Six::repeat Three (n+2)++Six::repeat Three t.
-Definition callback_clock u n t b :=
-  b*(weight u+14*n+28*t+14*b+196)+weight u+28*n+92*t+38*b+518.
-
-Lemma callback_weights u n t b :
-  weight (callback_middle t b)=14*t+14*b+54 /\
-  weight (callback_outer u n t)=weight u+14*n+14*t+108 /\
-  right_clock (callback_outer u n t)=right_clock u+10*n+10*t+78.
-Proof.
-  unfold callback_middle, callback_outer.
-  change (weight (repeat Three (t+2)++[Six]++repeat Three b)=14*t+14*b+54 /\
-    weight ([Three]++u++[Six]++repeat Three (n+2)++[Six]++repeat Three (t+1))=weight u+14*n+14*t+108 /\
-    right_clock ([Three]++u++[Six]++repeat Three (n+2)++[Six]++repeat Three (t+1))=right_clock u+10*n+10*t+78).
-  rewrite !weight_app, !weight_threes, !right_clock_app, !right_clock_threes.
-  assert (weight [Six]=26) by reflexivity; assert (weight [Three]=14) by reflexivity.
-  assert (right_clock [Six]=19) by reflexivity; assert (right_clock [Three]=10) by reflexivity.
-  repeat split; lia.
-Qed.
+  core_bits (Three::callback_middle t b++[Three;Three]) *> [0;0;1;0;1] *> r.
+Definition callback_outer u n t := Three::u++Six::[Three]^^(n+2)++Six::[Three]^^(t+1).
+Definition callback_next u n t b := [Three]^^(b+1)++u++Six::[Three]^^(n+2)++Six::[Three]^^t.
 
 Lemma callback_input t b r :
-  copies (2*t+4) [S0;S1] ++ callback_payload t b r =
-  core_suffix (2*(t+1)+2) (callback_middle t b++[Three])
-    (S0::S1::S0::S1::r).
+  [0;1]^^(2*t+4) *> callback_payload t b r =
+  core_suffix (2*(t+1)+2) (callback_middle t b++[Three]) ([0;1;0;1] *> r).
 Proof.
-  unfold callback_payload, core_suffix.
+  unfold callback_payload,core_suffix.
   replace (2*t+4) with (2*(t+1)+2) by lia.
-  repeat first [rewrite <- app_assoc | progress cbn [app]]; reflexivity.
+  rewrite <- app_assoc. reflexivity.
 Qed.
 
 Lemma callback_row u n t b :
-  repeat Three b++callback_outer u n t = callback_next u n t b++[Three].
+  [Three]^^b++callback_outer u n t = callback_next u n t b++[Three].
 Proof.
-  unfold callback_outer, callback_next.
-  replace (b+1) with (S b) by lia; replace (t+1) with (S t) by lia.
-  rewrite !threes_succ_end.
-  repeat first [rewrite <- app_assoc | progress cbn [app]]; reflexivity.
+  unfold callback_outer,callback_next. rewrite !lpow_add.
+  repeat first [rewrite <- app_assoc | progress cbn[app lpow]]. reflexivity.
 Qed.
 
 Lemma callback_link u n t b r :
-  advance (callback_clock u n t b)
-    (tilted (u++[Three]) n
-      (copies (2*t+4) [S0;S1] ++ callback_payload t b r)) =
-  tilted (callback_next u n t b++[Three]) (t+2)
-    (copies (b+4) [S0;S1] ++ r).
+  tilted (u++[Three]) n ([0;1]^^(2*t+4) *> callback_payload t b r) -->+
+  tilted (callback_next u n t b++[Three]) (t+2) ([0;1]^^(b+4) *> r).
 Proof.
-  destruct (callback_weights u n t b) as [Hmiddle [Houter Hright]].
-  replace (callback_clock u n t b) with
-    ((18*n+30*(t+1)+2*weight (callback_middle t b)+left_clock u+181)+
-     (b*(weight (callback_outer u n t)+14*(t+2+b)+60)+
-      right_clock (callback_outer u n t)+10*b+24*(t+2)+73)) by
-    (rewrite Hmiddle,Houter,Hright; unfold callback_clock,weight; nia).
-  rewrite callback_input, advance_add, T_core_even_return.
-  pose proof (W_multi_six_phase (callback_outer u n t) (t+2) b
-    (copies 4 [S0;S1] ++ r)) as Hphase.
-  unfold page_core, callback_middle.
-  unfold callback_outer in Hphase.
-  repeat first [rewrite <- app_assoc in * | progress cbn [app] in *].
-  unfold callback_outer.
-  cbn [copies app] in Hphase.
-  unfold Sym in *; rewrite Hphase.
-  fold (callback_outer u n t).
-  rewrite callback_row, copies_add.
-  repeat rewrite <- app_assoc; reflexivity.
+  rewrite callback_input. follow11 T_even_return.
+  pose proof (W_multi_six (callback_outer u n t) (t+2) b ([0;1]^^4 *> r)) as H.
+  unfold page_core,callback_middle,callback_outer in *.
+  repeat first [rewrite <- app_assoc in H | progress cbn[app] in H].
+  repeat first [rewrite <- app_assoc | progress cbn[app]].
+  follow10 H.
+  fold (callback_outer u n t). rewrite callback_row.
+  rewrite (@lpow_add _ b 4 [S0;S1]),Str_app_assoc. finish.
 Qed.
 
-Lemma row_prepend q a gaps : repeat Three q++row a gaps = row (a+q) gaps.
+Lemma row_prepend q a gaps : [Three]^^q++row a gaps = row (a+q) gaps.
 Proof.
-  induction gaps as [|b gaps IH]; cbn [row].
-  - rewrite <- repeat_app; f_equal; lia.
-  - rewrite app_assoc,IH; reflexivity.
+  induction gaps as [|b gaps IH]; cbn[row].
+  - rewrite <- lpow_add. f_equal; lia.
+  - rewrite app_assoc,IH. reflexivity.
 Qed.
 
 Lemma callback_next_row a gaps n t b :
   callback_next (row a gaps) n t b = row (a+b+1) (t::(n+2)::gaps).
 Proof.
-  unfold callback_next; cbn [row].
-  replace (a+b+1) with (a+(b+1)) by lia.
-  rewrite <- row_prepend; repeat rewrite <- app_assoc; reflexivity.
+  unfold callback_next. cbn[row]. replace (a+b+1) with (a+(b+1)) by lia.
+  rewrite <- row_prepend.
+  repeat first [rewrite <- app_assoc | progress cbn[app]]. reflexivity.
 Qed.
 
-Lemma row_last_three a d gaps : row a (d::gaps)++[Three] = row a (S d::gaps).
+Lemma row_last_three a d gaps : row a (d::gaps)++[Three] = row a ((d+1)::gaps).
 Proof.
-  cbn [row]; rewrite threes_succ_end.
-  repeat rewrite <- app_assoc; reflexivity.
+  cbn[row]. rewrite (@lpow_add _ d 1 [Three]).
+  repeat first [rewrite <- app_assoc | progress cbn[app lpow]]. reflexivity.
 Qed.
 
-Definition exit_core v r := core_bits (Three::v++[Three;Three])++S0::r.
+Definition exit_core v r := core_bits (Three::v++[Three;Three]) *> [0] *> r.
 
-Lemma exit_core_form p v r : copies p [S0;S1]++exit_core v r =
-  core_suffix p (v++[Three]) r.
-Proof.
-  unfold exit_core,core_suffix.
-  repeat rewrite <- app_assoc; reflexivity.
-Qed.
-
-Definition row_exit_clock a b gaps n t s v :=
-  callback_clock (row a (gaps++[b])) n t (2*s+1)+
-  (4*(t+2)+30*(s+2)+2*weight v+113+
-   row_clock (a+2*s+2) ([t+1;n+2]++gaps++[b])).
-
-Definition row_exit_output a b gaps n t s v r :=
-  paired_frontier (a+2*s+2) b
-    (saved_pages ([t+1;n+2]++gaps) (saved_body (t+2) (s+2) v r)).
+Lemma exit_core_form p v r : [0;1]^^p *> exit_core v r = core_suffix p (v++[Three]) r.
+Proof. unfold exit_core,core_suffix. rewrite <- app_assoc. reflexivity. Qed.
 
 Lemma callback_row_exit a b gaps n t s v r :
-  advance (row_exit_clock a b gaps n t s v)
-    (tilted (row a (gaps++[b])++[Three]) n
-      (copies (2*t+4) [S0;S1]++callback_payload t (2*s+1) (exit_core v r))) =
-  row_exit_output a b gaps n t s v r.
+  tilted (row a (gaps++[b])++[Three]) n
+    ([0;1]^^(2*t+4) *> callback_payload t (2*s+1) (exit_core v r)) -->+
+  counter_pair (a+2*s+3) (b+1)
+    (saved_pages ([t+1;n+2]++gaps) (saved_body (t+2) (s+2) v r)).
 Proof.
-  unfold row_exit_clock; rewrite advance_add, callback_link, callback_next_row.
-  rewrite row_last_three.
+  follow11 callback_link. rewrite callback_next_row,row_last_three.
   replace (a+(2*s+1)+1) with (a+2*s+2) by lia.
-  replace (2*s+1+4) with (2*(s+2)+1) by lia.
-  rewrite exit_core_form.
-  replace (S t) with (t+1) by lia.
-  rewrite (T_core_odd_frontier (a+2*s+2) b ([t+1;n+2]++gaps)).
-  reflexivity.
+  replace (2*s+1+4) with (2*(s+2)+1) by lia. rewrite exit_core_form.
+  follow10 (T_odd_frontier (a+2*s+2) b ([t+1;n+2]++gaps)).
+  replace (1+(a+2*s+2)) with (a+2*s+3) by lia.
+  replace (1+b) with (b+1) by lia. finish.
 Qed.
 
 Fixpoint exit_chain t indices s v r := match indices with
-  | [] => callback_payload t (2*s+1) (exit_core v r)
-  | z::indices => callback_payload t (2*z) (exit_chain z indices s v r)
-  end.
-
-Fixpoint exit_chain_clock a b gaps n t indices s v := match indices with
-  | [] => row_exit_clock a b gaps n t s v
-  | z::indices => callback_clock (row a (gaps++[b])) n t (2*z)+
-      exit_chain_clock (a+2*z+1) b (t::(n+2)::gaps) (t+2) z indices s v
-  end.
-
-Fixpoint exit_chain_output a b gaps n t indices s v r := match indices with
-  | [] => row_exit_output a b gaps n t s v r
-  | z::indices => exit_chain_output (a+2*z+1) b (t::(n+2)::gaps) (t+2) z indices s v r
-  end.
-
-Lemma exit_chain_run indices : forall a b gaps n t s v r,
-  advance (exit_chain_clock a b gaps n t indices s v)
-    (tilted (row a (gaps++[b])++[Three]) n
-      (copies (2*t+4) [S0;S1]++exit_chain t indices s v r)) =
-  exit_chain_output a b gaps n t indices s v r.
-Proof.
-  induction indices as [|z indices IH]; intros a b gaps n t s v r;
-    cbn [exit_chain_clock exit_chain exit_chain_output].
-  - apply callback_row_exit.
-  - rewrite advance_add, callback_link, callback_next_row; apply IH.
-Qed.
+  [] => callback_payload t (2*s+1) (exit_core v r)
+  | z::indices => callback_payload t (2*z) (exit_chain z indices s v r) end.
 
 Lemma saved_pages_append u v r : saved_pages (u++v) r = saved_pages v (saved_pages u r).
-Proof.
-  revert r; induction u as [|b u IH]; intro r; cbn [saved_pages app];
-    [reflexivity | apply IH].
-Qed.
+Proof. gen r. induction u; intros; cbn[saved_pages app]; [reflexivity|apply IHu]. Qed.
 
-Lemma exit_chain_prefix indices : forall a b extras c d n t s v r,
+Lemma exit_chain_return indices : forall a b extras c d n t s v r,
   exists aa rr, a+2*s+3<=aa /\
-    exit_chain_output a b (extras++[d;c]) n t indices s v r =
-    counter_pair aa (b+1) (page (repeat Three c)++page (repeat Three d)++rr).
+    tilted (row a ((extras++[d;c])++[b])++[Three]) n
+      ([0;1]^^(2*t+4) *> exit_chain t indices s v r) -->+
+    counter_pair aa (b+1) (page ([Three]^^c) *> page ([Three]^^d) *> rr).
 Proof.
   induction indices as [|z indices IH]; intros a b extras c d n t s v r.
   - exists (a+2*s+3),
       (saved_pages ([t+1;n+2]++extras) (saved_body (t+2) (s+2) v r)).
-    split; [lia |].
-    cbn [exit_chain_output]; unfold row_exit_output.
-    rewrite app_assoc, saved_pages_append; cbn [saved_pages].
-    unfold paired_frontier,counter_pair,G.
-    replace (S (a+2*s+2)) with (a+2*s+3) by lia.
-    replace (S b) with (b+1) by lia; reflexivity.
+    split; [lia|]. cbn[exit_chain]. follow10 callback_row_exit.
+    rewrite app_assoc,saved_pages_append. finish.
   - destruct (IH (a+2*z+1) b (t::(n+2)::extras) c d (t+2) z s v r)
-      as [aa [rr [Hbound Houtput]]].
-    exists aa,rr; split; [lia |].
-    cbn [exit_chain_output]; exact Houtput.
+      as [aa [rr [Ha H]]].
+    exists aa,rr. split; [lia|]. cbn[exit_chain]. follow11 callback_link.
+    rewrite callback_next_row. exact H.
 Qed.
 
-Definition qodd_first x b := repeat Three (4*b+2)++Six::repeat Three (6*x+3).
-Definition qodd_second x b := repeat Three (6*b+4)++
-  Six::repeat Three (6*x+3)++Six::repeat Three (3*x+1).
+Definition qodd_first x b := [Three]^^(4*b+2)++Six::[Three]^^(6*x+3).
+Definition qodd_second x b := [Three]^^(6*b+4)++Six::[Three]^^(6*x+3)++Six::[Three]^^(3*x+1).
 Definition qodd_left x b := row (2*x+6*b+5) [2*b+3;3*x+1;6*x+3].
-Definition qodd_clock x b := 812*x*x+1008*x*b+448*b*b+2472*x+2078*b+2519.
-
-Lemma qodd_weights x b :
-  weight (qodd_first x b)=56*b+84*x+96 /\
-  weight (qodd_second x b)=84*b+126*x+164.
-Proof.
-  unfold qodd_first,qodd_second.
-  change (weight (repeat Three (4*b+2)++[Six]++repeat Three (6*x+3))=56*b+84*x+96 /\
-    weight (repeat Three (6*b+4)++[Six]++repeat Three (6*x+3)++[Six]++repeat Three (3*x+1))=84*b+126*x+164).
-  rewrite !weight_app, !weight_threes.
-  assert (weight [Six]=26) by reflexivity; split; lia.
-Qed.
 
 Lemma qodd_pair x b :
-  repeat Three (4*b+2)++Six::repeat Three (2*(3*x)+4) = qodd_first x b++[Three].
+  [Three]^^(4*b+2)++Six::[Three]^^(2*(3*x)+4) = qodd_first x b++[Three].
 Proof.
-  unfold qodd_first; replace (2*(3*x)+4) with (S (6*x+3)) by lia.
-  rewrite threes_succ_end; repeat rewrite <- app_assoc; reflexivity.
+  unfold qodd_first. replace (2*(3*x)+4) with ((6*x+3)+1) by lia.
+  rewrite (@lpow_add _ (6*x+3) 1 [Three]).
+  repeat first [rewrite <- app_assoc | progress cbn[app lpow]]. reflexivity.
 Qed.
 
 Lemma qodd_first_page x b :
-  repeat Three (2*b+3-1)++qodd_first x b++Six::repeat Three (3*x+2) =
-  qodd_second x b++[Three].
+  [Three]^^(2*b+2)++qodd_first x b++Six::[Three]^^(3*x+2) = qodd_second x b++[Three].
 Proof.
   unfold qodd_first,qodd_second.
-  replace (2*b+3-1) with (2*b+2) by lia.
   replace (6*b+4) with ((2*b+2)+(4*b+2)) by lia.
-  rewrite (repeat_app Three (2*b+2) (4*b+2)).
-  replace (3*x+2) with (S (3*x+1)) by lia; rewrite threes_succ_end.
-  repeat first [rewrite <- app_assoc | progress cbn [app]]; reflexivity.
+  replace (3*x+2) with ((3*x+1)+1) by lia.
+  rewrite (@lpow_add _ (2*b+2) (4*b+2) [Three]),(@lpow_add _ (3*x+1) 1 [Three]).
+  repeat first [rewrite <- app_assoc | progress cbn[app lpow]]. reflexivity.
 Qed.
 
 Lemma qodd_second_page x b :
-  repeat Three (2*x+2-1)++qodd_second x b++Six::repeat Three (2*b+2+2) =
-  qodd_left x b++[Three].
+  [Three]^^(2*x+1)++qodd_second x b++Six::[Three]^^(2*b+2+2) = qodd_left x b++[Three].
 Proof.
-  unfold qodd_second,qodd_left; cbn [row].
-  replace (2*x+2-1) with (2*x+1) by lia.
+  unfold qodd_second,qodd_left. cbn[row].
   replace (2*x+6*b+5) with ((2*x+1)+(6*b+4)) by lia.
-  rewrite (repeat_app Three (2*x+1) (6*b+4)).
-  replace (2*b+2+2) with (S (2*b+3)) by lia; rewrite threes_succ_end.
-  repeat first [rewrite <- app_assoc | progress cbn [app]]; reflexivity.
+  replace (2*b+2+2) with ((2*b+3)+1) by lia.
+  rewrite (@lpow_add _ (2*x+1) (6*b+4) [Three]),(@lpow_add _ (2*b+3) 1 [Three]).
+  repeat first [rewrite <- app_assoc | progress cbn[app lpow]]. reflexivity.
 Qed.
 
 Lemma Q_odd_entry x b r :
-  advance (qodd_clock x b) (Qfront x (2*b+1) r) =
-  tilted (qodd_left x b++[Three]) (b+1) (copies (2*x+2) [S0;S1]++r).
+  Qfront x (2*b+1) r -->+
+  tilted (qodd_left x b++[Three]) (b+1) ([0;1]^^(2*x+2) *> r).
 Proof.
-  destruct (qodd_weights x b) as [Hfirst Hsecond].
-  unfold Qfront; replace (6*x+2) with (2*(3*x)+2) by lia.
+  unfold Qfront. replace (6*x+2) with (2*(3*x)+2) by lia.
   replace (2*(2*b+1)+4) with ((4*b+2)+4) by lia.
-  replace (qodd_clock x b) with
-    ((56*(3*x)*(3*x)+352*(3*x)+687+(4*b+2)*(42*(3*x)+14*(4*b+2)+194))+
-     (page_clock (qodd_first x b) (3*x) (2*b+2) (2*b+3)+
-      page_clock (qodd_second x b) (2*b+2) (b+1) (2*x+2))) by
-    (unfold qodd_clock,page_clock; rewrite Hfirst,Hsecond;
-     replace (2*b+3-1) with (2*b+2) by lia;
-     replace (2*x+2-1) with (2*x+1) by lia; nia).
-  rewrite advance_add, paired_even, qodd_pair.
+  follow11 paired_even. rewrite qodd_pair.
   replace (2*b+1+2) with (2*b+3) by lia.
   replace (4*b+2+3) with (2*(2*b+2)+1) by lia.
-  assert (Hpage : S0::page (repeat Three (2*b+3))++qright x r =
-    [S0;S1;S1;S1;S1;S0]++copies (2*b+3) [S1;S1;S1;S0]++S0::S0::qright x r).
-  { unfold page; rewrite core_bits_threes; repeat rewrite <- app_assoc; reflexivity. }
-  rewrite Hpage, advance_add, T_positive_page by lia.
+  unfold page. rewrite core_bits_threes,!Str_app_assoc.
+  change ([0] *> [1;1;1;1;0] *> U^^(2*b+3) *> [0;0] *> qright x r)
+    with ([0;1;1;1;1;0] *> U^^(2*b+3) *> [0] *> [0] *> qright x r).
+  replace (2*b+3) with (1+(2*b+2)) by lia. follow11 T_page.
   rewrite qodd_first_page.
-  replace (2*b+3) with (2*(b+1)+1) by lia.
-  unfold qright; cbn [app].
-  etransitivity; [apply T_positive_page; lia |].
-  rewrite qodd_second_page; reflexivity.
+  replace (1+(2*b+2)) with (2*(b+1)+1) by lia. unfold qright.
+  change ([0] *> [1;1;1;1;0] *> U^^(2*x+2) *> [0] *> r)
+    with ([0;1;1;1;1;0] *> U^^(2*x+2) *> [0] *> r).
+  replace (2*x+2) with (1+(2*x+1)) by lia. follow10 T_page.
+  rewrite qodd_second_page. finish.
 Qed.
 
-Lemma Q_odd_chain_to_shield indices a b s v r :
+Lemma Q_odd_shield indices a b s v r :
   2<=b -> 24<=4*a+6*b+2*s+10 ->
   exists aa rr, 24<=aa /\ 6<=2*b+3 /\
-    advance (qodd_clock (2*a+1) b+
-      exit_chain_clock (4*a+6*b+7) (12*a+9) [2*b+3;6*a+4] (b+1) (2*a) indices s v)
-      (Qfront (2*a+1) (2*b+1) (exit_chain (2*a) indices s v r)) =
+    Qfront (2*a+1) (2*b+1) (exit_chain (2*a) indices s v r) -->+
     shield aa (12*a+10) (2*b+3) rr.
 Proof.
-  intros Hb Hsize; rewrite advance_add,Q_odd_entry.
-  unfold qodd_left.
-  replace (2*(2*a+1)+6*b+5) with (4*a+6*b+7) by lia.
+  intros Hb Hsize.
+  destruct (exit_chain_return indices (4*a+6*b+7) (12*a+9) [] (6*a+4) (2*b+3)
+    (b+1) (2*a) s v r) as [aa [rr [Hbound H]]].
+  exists aa,rr. split; [lia|]. split; [lia|]. follow10 Q_odd_entry.
+  unfold qodd_left. replace (2*(2*a+1)+6*b+5) with (4*a+6*b+7) by lia.
   replace (3*(2*a+1)+1) with (6*a+4) by lia.
   replace (6*(2*a+1)+3) with (12*a+9) by lia.
   replace (2*(2*a+1)+2) with (2*(2*a)+4) by lia.
-  rewrite (exit_chain_run indices (4*a+6*b+7) (12*a+9) [2*b+3;6*a+4]).
-  destruct (exit_chain_prefix indices (4*a+6*b+7) (12*a+9) [] (6*a+4) (2*b+3)
-    (b+1) (2*a) s v r) as [aa [rr [Hbound Houtput]]].
-  exists aa,rr; split; [lia |]; split; [lia |].
-  cbn [app] in Houtput; rewrite Houtput; unfold shield.
-  replace (12*a+9+1) with (12*a+10) by lia.
-  replace ((12*a+10)/2-1) with (6*a+4); [reflexivity |].
-  replace (12*a+10) with ((6*a+5)*2) by lia.
-  rewrite Nat.div_mul by lia; lia.
+  eapply evstep_trans; [apply progress_evstep,H|]. unfold shield.
+  replace ((12*a+10)/2-1) with (6*a+4).
+  - replace (12*a+9+1) with (12*a+10) by lia. finish.
+  - replace (12*a+10) with ((6*a+5)*2) by lia. rewrite Nat.div_mul by lia. lia.
 Qed.
 
 Lemma qframe_exit_chain x z indices s v r : 0<x -> 0<z ->
-  qframe x z (exit_chain (x-1) indices s v r) =
-  exit_chain (z-1) ((x-1)::indices) s v r.
+  qframe x z (exit_chain (x-1) indices s v r) = exit_chain (z-1) ((x-1)::indices) s v r.
 Proof.
-  intros Hx Hz; cbn [exit_chain].
-  unfold qframe,callback_payload,callback_middle.
-  cbn [core_bits block_bits].
-  rewrite !core_bits_app,!core_bits_threes.
-  cbn [core_bits block_bits].
-  rewrite core_bits_threes.
+  intros Hx Hz. cbn[exit_chain]. unfold qframe,callback_payload,callback_middle.
+  repeat first [rewrite core_bits_app | rewrite core_bits_threes |
+    progress cbn[core_bits flat_map block_bits]].
   replace (z-1+2) with (z+1) by lia.
-  replace (z+2) with (S (z+1)) by lia.
-  cbn [copies].
+  replace (z+2) with (1+(z+1)) by lia.
   replace (2*x) with (2*(x-1)+2) by lia.
-  rewrite (copies_add (2*(x-1)) 2 [S1;S1;S1;S0]).
-  repeat first [rewrite <- app_assoc | progress cbn [copies app]]; reflexivity.
+  rewrite (@lpow_add _ (2*(x-1)) 2 U).
+  cbn[Nat.add lpow]. rewrite !Str_app_assoc. reflexivity.
 Qed.
 
-Definition pure_page c r := page (repeat Three c)++r.
-Definition page_header c r := [S1;S1;S1;S1;S0]++
-  copies c [S1;S1;S1;S0]++S0::r.
+Definition pure_page c r := page ([Three]^^c) *> r.
+Definition page_header c r := [1;1;1;1;0] *> U^^c *> [0] *> r.
 
-Lemma pure_page_header c r : pure_page c r=page_header c (S0::r).
-Proof.
-  unfold pure_page,page,page_header; rewrite core_bits_threes.
-  repeat rewrite <- app_assoc; reflexivity.
-Qed.
+Lemma pure_page_header c r : pure_page c r = page_header c ([0] *> r).
+Proof. unfold pure_page,page,page_header. rewrite core_bits_threes,!Str_app_assoc. reflexivity. Qed.
 
 Lemma header_core m c r :
-  copies (2*m) [S0;S1]++S0::page_header (c+2) r =
-  core_suffix (2*m+1) (repeat Three c++[Three]) r.
+  [0;1]^^(2*m) *> [0] *> page_header (c+2) r =
+  core_suffix (2*m+1) ([Three]^^c++[Three]) r.
 Proof.
-  replace (2*m+1) with (S (2*m)) by lia.
-  rewrite <- threes_succ_end,positive_page_form.
-  unfold page_header; replace (S (S c)) with (c+2) by lia.
-  repeat rewrite <- app_assoc; reflexivity.
+  replace (2*m+1) with (1+2*m) by lia.
+  rewrite lpow_shift. change ([Three]++[Three]^^c) with ([Three]^^(1+c)).
+  rewrite positive_page_form. unfold page_header.
+  replace (1+(1+c)) with (c+2) by lia. reflexivity.
 Qed.
 
-Lemma page_row_next a b gaps n c : 0<c ->
-  repeat Three (c-1)++row a (gaps++[b])++Six::repeat Three (n+2) =
-  row (a+(c-1)) (((n+1)::gaps)++[b])++[Three].
+Lemma page_row_next a b gaps n c :
+  [Three]^^c++row a (gaps++[b])++Six::[Three]^^(n+2) =
+  row (a+c) (((n+1)::gaps)++[b])++[Three].
 Proof.
-  intro Hc; cbn [row app].
-  rewrite <- row_prepend.
-  replace (n+2) with (S (n+1)) by lia; rewrite threes_succ_end.
-  repeat rewrite <- app_assoc; reflexivity.
+  cbn[row app]. rewrite <- row_prepend.
+  replace (n+2) with ((n+1)+1) by lia.
+  rewrite (@lpow_add _ (n+1) 1 [Three]).
+  repeat first [rewrite <- app_assoc | progress cbn[app lpow]]. reflexivity.
 Qed.
 
-Lemma positive_page_row a b gaps n m c r : 0<c ->
-  advance (page_clock (row a (gaps++[b])) n m c)
-    (tilted (row a (gaps++[b])++[Three]) n
-      (copies (2*m+1) [S0;S1]++S0::pure_page c r)) =
-  tilted (row (a+(c-1)) (((n+1)::gaps)++[b])++[Three]) m
-    (copies c [S0;S1]++S0::r).
+Lemma page_row a b gaps n m c r :
+  tilted (row a (gaps++[b])++[Three]) n
+    ([0;1]^^(2*m+1) *> [0] *> page_header (1+c) r) -->+
+  tilted (row (a+c) (((n+1)::gaps)++[b])++[Three]) m ([0;1]^^(1+c) *> r).
 Proof.
-  intro Hc; rewrite pure_page_header; unfold page_header.
-  etransitivity; [apply T_positive_page; exact Hc |].
-  rewrite page_row_next by exact Hc; reflexivity.
+  unfold page_header.
+  change ([0] *> [1;1;1;1;0] *> U^^(1+c) *> [0] *> r)
+    with ([0;1;1;1;1;0] *> U^^(1+c) *> [0] *> r).
+  follow10 T_page. rewrite page_row_next. finish.
 Qed.
 
-Definition RowReturn a b gaps n m r : Prop :=
-  exists clock delta tail, 0<clock /\
-    advance clock (tilted (row a (gaps++[b])++[Three]) n
-      (copies (2*m+1) [S0;S1]++S0::r)) =
-    counter_pair (a+delta+1) (b+1) (saved_pages gaps tail).
+Definition RowReturn a b gaps n m r := exists delta tail,
+  tilted (row a (gaps++[b])++[Three]) n ([0;1]^^(2*m+1) *> [0] *> r) -->+
+  counter_pair (a+delta+1) (b+1) (saved_pages gaps tail).
 
 Lemma row_return_odd_page a b gaps n m z r :
   RowReturn (a+2*z) b ((n+1)::gaps) m z r ->
   RowReturn a b gaps n m (pure_page (2*z+1) r).
 Proof.
-  intros [clock [delta [tail [Hclock Hreturn]]]].
-  exists (page_clock (row a (gaps++[b])) n m (2*z+1)+clock),
-    (2*z+delta),(page (repeat Three (n+1))++tail).
-  split; [lia |].
-  rewrite advance_add,positive_page_row by lia.
-  replace (a+(2*z+1-1)) with (a+2*z) by lia.
-  rewrite Hreturn; cbn [saved_pages]; f_equal; lia.
+  intros [delta [tail H]].
+  exists (2*z+delta),(page ([Three]^^(n+1)) *> tail).
+  rewrite pure_page_header. replace (2*z+1) with (1+2*z) by lia.
+  follow11 page_row. replace (1+2*z) with (2*z+1) by lia. follow10 H.
+  replace (a+2*z+delta+1) with (a+(2*z+delta)+1) by lia. finish.
 Qed.
 
 Lemma row_return_even_page a b gaps n m z d r :
   RowReturn a b gaps n m (pure_page (2*z+2) (page_header (d+2) r)).
 Proof.
-  exists (page_clock (row a (gaps++[b])) n m (2*z+2)+
-    (4*m+30*(z+1)+2*weight (repeat Three d)+113+
-     row_clock (a+(2*z+1)) (((n+2)::gaps)++[b]))),
-    (2*z+1),(page (repeat Three (n+2))++saved_body m (z+1) (repeat Three d) r).
-  split; [lia |].
-  rewrite advance_add,positive_page_row by lia.
-  replace (a+(2*z+2-1)) with (a+(2*z+1)) by lia.
-  replace (2*z+2) with (2*(z+1)) by lia.
-  rewrite header_core.
-  cbn [app]; rewrite row_last_three.
-  replace (S (n+1)) with (n+2) by lia.
-  rewrite (T_core_odd_frontier (a+(2*z+1)) b ((n+2)::gaps)).
-  unfold paired_frontier,counter_pair,G; cbn [saved_pages].
-  replace (S (a+(2*z+1))) with (a+(2*z+1)+1) by lia.
-  replace (S b) with (b+1) by lia; reflexivity.
+  exists (2*z+1),(page ([Three]^^(n+2)) *> saved_body m (z+1) ([Three]^^d) r).
+  rewrite pure_page_header. replace (2*z+2) with (1+(2*z+1)) by lia.
+  follow11 page_row. replace (1+(2*z+1)) with (2*(z+1)) by lia.
+  rewrite header_core. cbn[app]. rewrite row_last_three.
+  replace (n+1+1) with (n+2) by lia.
+  follow10 (T_odd_frontier (a+(2*z+1)) b ((n+2)::gaps)).
+  replace (1+(a+(2*z+1))) with (a+(2*z+1)+1) by lia.
+  replace (1+b) with (b+1) by lia. finish.
 Qed.
 
 Lemma short_pure_pages z d r :
-  copies (2*z+2) [S0;S1]++S0::pure_page 1 (pure_page (d+2) r) =
-  short_page_suffix (z+1) d (S0::r).
+  [0;1]^^(2*z+2) *> [0] *> pure_page 1 (pure_page (d+2) r) =
+  short_page_suffix (z+1) d ([0] *> r).
 Proof.
   unfold short_page_suffix.
-  replace (2*(z+1)+1) with (S (2*z+2)) by lia.
-  change (@nil block) with (repeat Three 0); rewrite positive_page_form.
-  unfold pure_page,page; rewrite !core_bits_threes.
-  repeat first [rewrite <- app_assoc | progress cbn [copies app]]; reflexivity.
+  replace (2*(z+1)+1) with (1+(2*z+2)) by lia.
+  change (@nil block) with ([Three]^^0). rewrite positive_page_form.
+  unfold pure_page,page. rewrite !core_bits_threes,!Str_app_assoc. reflexivity.
 Qed.
 
 Lemma row_return_even_page_short a b gaps n m z d r :
-  RowReturn a b gaps n (S m)
-    (pure_page (2*z+2) (pure_page 1 (pure_page (d+2) r))).
+  RowReturn a b gaps n (1+m) (pure_page (2*z+2) (pure_page 1 (pure_page (d+2) r))).
 Proof.
-  exists (page_clock (row a (gaps++[b])) n (S m) (2*z+2)+
-    (4*m+58*(z+1)+28*d+293+
-     row_clock (a+(2*z+1)) (((n+2)::gaps)++[b]))),
-    (2*z+1),(page (repeat Three (n+2))++
-      saved_body m (z+1+2) (Six::repeat Three d) (S0::r)).
-  split; [lia |].
-  rewrite advance_add,positive_page_row by lia.
-  replace (a+(2*z+2-1)) with (a+(2*z+1)) by lia.
-  rewrite short_pure_pages.
-  cbn [app]; rewrite row_last_three.
-  replace (S (n+1)) with (n+2) by lia.
-  rewrite (T_short_page_frontier (a+(2*z+1)) b ((n+2)::gaps)).
-  unfold paired_frontier,counter_pair,G; cbn [saved_pages].
-  replace (S (a+(2*z+1))) with (a+(2*z+1)+1) by lia.
-  replace (S b) with (b+1) by lia; reflexivity.
+  exists (2*z+1),(page ([Three]^^(n+2)) *>
+    saved_body m (z+1+2) (Six::[Three]^^d) ([0] *> r)).
+  rewrite pure_page_header. replace (2*z+2) with (1+(2*z+1)) by lia.
+  follow11 page_row. replace (1+(2*z+1)) with (2*z+2) by lia.
+  rewrite short_pure_pages. cbn[app]. rewrite row_last_three.
+  replace (n+1+1) with (n+2) by lia.
+  follow10 (T_short_page_frontier (a+(2*z+1)) b ((n+2)::gaps)).
+  replace (1+(a+(2*z+1))) with (a+(2*z+1)+1) by lia.
+  replace (1+b) with (b+1) by lia. finish.
 Qed.
 
-Definition frame_core s v := repeat Three (s+2)++Six::v.
+Definition frame_core s v := [Three]^^(s+2)++Six::v.
 Definition frame_body s v r :=
-  core_bits (repeat Three (s+3)++Six::v++[Three;Three])++
-    [S0;S0;S1;S0;S1]++r.
+  core_bits ([Three]^^(s+3)++Six::v++[Three;Three]) *> [0;0;1;0;1] *> r.
 
 Lemma frame_body_core p s v r :
-  copies p [S0;S1]++frame_body s v r =
-  core_suffix p (frame_core s v++[Three]) ([S0;S1;S0;S1]++r).
+  [0;1]^^p *> frame_body s v r =
+  core_suffix p (frame_core s v++[Three]) ([0;1;0;1] *> r).
 Proof.
   unfold frame_body,frame_core,core_suffix.
-  replace (s+3) with (S (s+2)) by lia.
-  cbn [repeat].
-  repeat rewrite <- app_assoc; reflexivity.
+  replace (s+3) with (1+(s+2)) by lia. cbn[Nat.add lpow].
+  repeat first [rewrite <- app_assoc | progress cbn[app]]. reflexivity.
 Qed.
 
 Lemma row_return_odd_mixed a b gaps n m z s v r :
   RowReturn a b gaps n m (page_header (2*z+1) (frame_body s v r)).
 Proof.
-  exists (page_clock (row a (gaps++[b])) n m (2*z+1)+
-    (4*m+30*z+2*weight (frame_core s v)+113+
-     row_clock (a+2*z) (((n+2)::gaps)++[b]))),
-    (2*z),(page (repeat Three (n+2))++
-      saved_body m z (frame_core s v) ([S0;S1;S0;S1]++r)).
-  split; [lia |].
-  rewrite advance_add; unfold page_header.
-  etransitivity; [apply f_equal; apply T_positive_page; lia |].
-  rewrite page_row_next by lia.
-  replace (a+(2*z+1-1)) with (a+2*z) by lia.
-  rewrite frame_body_core.
-  cbn [app]; rewrite row_last_three.
-  replace (S (n+1)) with (n+2) by lia.
-  rewrite (T_core_odd_frontier (a+2*z) b ((n+2)::gaps)).
-  unfold paired_frontier,counter_pair,G; cbn [saved_pages].
-  replace (S (a+2*z)) with (a+2*z+1) by lia.
-  replace (S b) with (b+1) by lia; reflexivity.
+  exists (2*z),(page ([Three]^^(n+2)) *>
+    saved_body m z (frame_core s v) ([0;1;0;1] *> r)).
+  replace (2*z+1) with (1+2*z) by lia. follow11 page_row.
+  replace (1+2*z) with (2*z+1) by lia. rewrite frame_body_core.
+  cbn[app]. rewrite row_last_three. replace (n+1+1) with (n+2) by lia.
+  follow10 (T_odd_frontier (a+2*z) b ((n+2)::gaps)).
+  replace (1+(a+2*z)) with (a+2*z+1) by lia.
+  replace (1+b) with (b+1) by lia. finish.
 Qed.
 
 Fixpoint frame_pages t indices s v r := match indices with
-  | [] => pure_page (t+1) (page_header (t+3) (frame_body s v r))
-  | z::indices => pure_page t (pure_page (t+4) (frame_pages z indices s v r))
-  end.
+  [] => pure_page (t+1) (page_header (t+3) (frame_body s v r))
+  | z::indices => pure_page t (pure_page (t+4) (frame_pages z indices s v r)) end.
 
 Lemma frame_pages_return indices : Forall (fun z => 1<=z) indices ->
-  forall t a b gaps n m s v r, 1<=t ->
-    RowReturn a b gaps n m (frame_pages t indices s v r).
+  forall t a b gaps n m s v r, 1<=t -> RowReturn a b gaps n m (frame_pages t indices s v r).
 Proof.
-  intro Hindices; induction Hindices as [|z indices Hz Hindices IH];
-    intros t a b gaps n m s v r Ht; cbn [frame_pages].
-  - pose proof (Nat.div_mod t 2 ltac:(lia)) as Hdivide.
-    pose proof (Nat.mod_upper_bound t 2 ltac:(lia)) as Hmod.
-    destruct (Nat.eq_dec (t mod 2) 0) as [Heven|Hodd].
-    + replace (t+1) with (2*(t/2)+1) by lia.
-      apply row_return_odd_page.
-      replace (t+3) with (2*(t/2+1)+1) by lia.
-      apply row_return_odd_mixed.
+  intro Hindices. induction Hindices as [|z indices Hz Hindices IH];
+    intros t a b gaps n m s v r Ht; cbn[frame_pages].
+  - pose proof (Nat.div_mod t 2 ltac:(lia)). pose proof (Nat.mod_upper_bound t 2 ltac:(lia)).
+    destruct (Nat.eq_dec (t mod 2) 0).
+    + replace (t+1) with (2*(t/2)+1) by lia. apply row_return_odd_page.
+      replace (t+3) with (2*(t/2+1)+1) by lia. apply row_return_odd_mixed.
     + replace (t+1) with (2*(t/2)+2) by lia.
-      replace (t+3) with ((2*(t/2)+2)+2) by lia.
-      apply row_return_even_page.
-  - pose proof (Nat.div_mod t 2 ltac:(lia)) as Hdivide.
-    pose proof (Nat.mod_upper_bound t 2 ltac:(lia)) as Hmod.
-    destruct (Nat.eq_dec (t mod 2) 0) as [Heven|Hodd].
-    + rewrite (pure_page_header (t+4) (frame_pages z indices s v r)).
+      replace (t+3) with ((2*(t/2)+2)+2) by lia. apply row_return_even_page.
+  - pose proof (Nat.div_mod t 2 ltac:(lia)). pose proof (Nat.mod_upper_bound t 2 ltac:(lia)).
+    destruct (Nat.eq_dec (t mod 2) 0).
+    + rewrite (pure_page_header (t+4)).
       replace t with (2*(t/2-1)+2) at 1 by lia.
-      replace (t+4) with ((t+2)+2) by lia.
-      apply row_return_even_page.
-    + replace t with (2*(t/2)+1) at 1 by lia.
-      apply row_return_odd_page.
+      replace (t+4) with ((t+2)+2) by lia. apply row_return_even_page.
+    + replace t with (2*(t/2)+1) at 1 by lia. apply row_return_odd_page.
       replace (t+4) with (2*(t/2+2)+1) by lia.
-      apply row_return_odd_page; apply IH; exact Hz.
+      apply row_return_odd_page. apply IH. exact Hz.
 Qed.
 
 Lemma leading_page_frames_return indices : Forall (fun z => 1<=z) indices ->
   forall t a b gaps n k s v r, 1<=t ->
     RowReturn a b gaps n (k+1) (pure_page (k+3) (frame_pages t indices s v r)).
 Proof.
-  intro Hindices; intros t a b gaps n k s v r Ht.
-  pose proof (Nat.div_mod k 2 ltac:(lia)) as Hdivide.
-  pose proof (Nat.mod_upper_bound k 2 ltac:(lia)) as Hmod.
-  destruct (Nat.eq_dec (k mod 2) 0) as [Heven|Hodd].
+  intros Hindices t a b gaps n k s v r Ht.
+  pose proof (Nat.div_mod k 2 ltac:(lia)). pose proof (Nat.mod_upper_bound k 2 ltac:(lia)).
+  destruct (Nat.eq_dec (k mod 2) 0).
   - replace (k+3) with (2*(k/2+1)+1) by lia.
-    apply row_return_odd_page; apply frame_pages_return; assumption.
+    apply row_return_odd_page. apply frame_pages_return; assumption.
   - replace (k+3) with (2*(k/2+1)+2) by lia.
-    destruct indices as [|z indices].
-    + cbn [frame_pages].
-      rewrite (pure_page_header (t+1) (page_header (t+3) (frame_body s v r))).
-      replace (t+1) with ((t-1)+2) by lia.
-      apply row_return_even_page.
-    + cbn [frame_pages].
-      destruct t as [|[|t]]; [lia | |].
-      * replace (k+1) with (S k) by lia.
-        change (1+4) with (3+2); apply row_return_even_page_short.
-      * rewrite (pure_page_header (S (S t)) (pure_page (S (S t)+4) (frame_pages z indices s v r))).
-        replace (S (S t)) with (t+2) by lia.
-        apply row_return_even_page.
+    destruct indices as [|z indices]; cbn[frame_pages].
+    + rewrite (pure_page_header (t+1)).
+      replace (t+1) with ((t-1)+2) by lia. apply row_return_even_page.
+    + destruct t as [|[|t]]; [lia| |].
+      * replace (k+1) with (1+k) by lia.
+        change (1+4) with (3+2). apply row_return_even_page_short.
+      * rewrite (pure_page_header (S (S t))).
+        replace (S (S t)) with (t+2) by lia. apply row_return_even_page.
 Qed.
 
-Fixpoint chain_growth indices := match indices with
-  | [] => 0
-  | z::indices => 2*z+1+chain_growth indices
-  end.
+Fixpoint chain_growth indices : nat := match indices with
+  [] => 0 | z::indices => 2*z+1+chain_growth indices end.
 
 Lemma saved_frame_body t s v r :
-  saved_body (t+2) (s+2) (v++[Three;Three]) r =
-  page_header (t+3) (frame_body s v r).
+  saved_body (t+2) (s+2) (v++[Three;Three]) r = page_header (t+3) (frame_body s v r).
 Proof.
   unfold saved_body,page_header,frame_body.
   repeat first [rewrite core_bits_app | rewrite core_bits_threes |
-    progress cbn [core_bits block_bits app] | rewrite <- app_assoc].
-  replace (S (t+2)) with (t+3) by lia.
-  replace (S (s+2)) with (s+3) by lia.
-  repeat rewrite <- app_assoc; reflexivity.
+    progress cbn[core_bits flat_map block_bits]].
+  replace (1+(t+2)) with (t+3) by lia.
+  replace (1+(s+2)) with (s+3) by lia. rewrite !Str_app_assoc. reflexivity.
 Qed.
 
-Lemma exit_chain_page_form indices : forall a b gaps n t s v r,
-  exit_chain_output a b gaps n t indices s (v++[Three;Three]) r =
+Lemma exit_chain_pages indices : forall a b gaps n t s v r,
+  tilted (row a (gaps++[b])++[Three]) n
+    ([0;1]^^(2*t+4) *> exit_chain t indices s (v++[Three;Three]) r) -->+
   counter_pair (a+chain_growth indices+2*s+3) (b+1)
     (saved_pages gaps (pure_page (n+2) (frame_pages t indices s v r))).
 Proof.
   induction indices as [|z indices IH]; intros a b gaps n t s v r.
-  - cbn [exit_chain_output chain_growth frame_pages].
-    unfold row_exit_output; rewrite saved_pages_append; cbn [saved_pages].
-    rewrite saved_frame_body.
-    unfold paired_frontier,counter_pair,G,pure_page.
-    replace (S (a+2*s+2)) with (a+0+2*s+3) by lia.
-    replace (S b) with (b+1) by lia; reflexivity.
-  - cbn [exit_chain_output chain_growth]; rewrite IH.
-    cbn [saved_pages frame_pages].
+  - cbn[exit_chain chain_growth frame_pages]. follow10 callback_row_exit.
+    rewrite saved_pages_append. cbn[saved_pages]. rewrite saved_frame_body.
+    replace (a+0+2*s+3) with (a+2*s+3) by lia. finish.
+  - cbn[exit_chain chain_growth]. follow11 callback_link.
+    rewrite callback_next_row.
+    follow10 (IH (a+2*z+1) b (t::(n+2)::gaps) (t+2) z s v r).
+    cbn[saved_pages frame_pages].
     replace (t+2+2) with (t+4) by lia.
     replace (a+2*z+1+chain_growth indices+2*s+3) with
-      (a+(2*z+1+chain_growth indices)+2*s+3) by lia.
-    unfold pure_page; reflexivity.
+      (a+(2*z+1+chain_growth indices)+2*s+3) by lia. finish.
 Qed.
 
 Definition q_page_a x b indices s := 2*x+6*b+chain_growth indices+2*s+8.
-Definition q_page_clock x b indices s v := qodd_clock x b+
-  exit_chain_clock (2*x+6*b+5) (6*x+3) [2*b+3;3*x+1]
-    (b+1) (x-1) indices s (v++[Three;Three]).
 Definition q_page_output x b indices s v r :=
   counter_pair (q_page_a x b indices s) (6*x+4)
     (pure_page (3*x+1) (pure_page (2*b+3) (pure_page (b+3)
       (frame_pages (x-1) indices s v r)))).
 
 Lemma Q_page_return x b indices s v r : 1<=x ->
-  advance (q_page_clock x b indices s v)
-    (Qfront x (2*b+1) (exit_chain (x-1) indices s (v++[Three;Three]) r)) =
+  Qfront x (2*b+1) (exit_chain (x-1) indices s (v++[Three;Three]) r) -->+
   q_page_output x b indices s v r.
 Proof.
-  intro Hx; unfold q_page_clock; rewrite advance_add,Q_odd_entry.
-  unfold qodd_left.
+  intro Hx. follow11 Q_odd_entry. unfold qodd_left.
   replace (2*x+2) with (2*(x-1)+4) by lia.
-  rewrite (exit_chain_run indices (2*x+6*b+5) (6*x+3) [2*b+3;3*x+1]).
-  rewrite exit_chain_page_form; cbn [saved_pages].
-  unfold q_page_output,q_page_a,pure_page.
+  follow10 (exit_chain_pages indices (2*x+6*b+5) (6*x+3) [2*b+3;3*x+1]).
+  cbn[saved_pages]. unfold q_page_output,q_page_a.
   replace (2*x+6*b+5+chain_growth indices+2*s+3) with
     (2*x+6*b+chain_growth indices+2*s+8) by lia.
   replace (6*x+3+1) with (6*x+4) by lia.
-  replace (b+1+2) with (b+3) by lia; reflexivity.
+  replace (b+1+2) with (b+3) by lia. finish.
 Qed.
 
-Definition even_prefix_clock a x b :=
-  (56*(2*a+1)*(2*a+1)+352*(2*a+1)+687+12*x*(42*(2*a+1)+14*(12*x)+194))+
-  (page_clock (row (12*x) [4*a+5]) (2*a+1) (6*x+1) (6*x+1)+
-   page_clock (row (18*x) [2*a+2;4*a+5]) (6*x+1) (3*x) (2*b+3)).
-
-Lemma even_prefix_pair a x :
-  repeat Three (12*x)++Six::repeat Three (2*(2*a+1)+4) =
-  row (12*x) [4*a+5]++[Three].
-Proof.
-  cbn [row]; replace (2*(2*a+1)+4) with (S (4*a+5)) by lia.
-  rewrite threes_succ_end; repeat rewrite <- app_assoc; reflexivity.
-Qed.
-
-Lemma even_page_prefix a x b r :
-  advance (even_prefix_clock a x b)
-    (counter_pair (4*a+4) (12*x+4) (pure_page (6*x+1) (pure_page (2*b+3) r))) =
-  tilted (row (18*x+2*b+2) [6*x+2;2*a+2;4*a+5]++[Three]) (3*x)
-    (copies (2*(b+1)+1) [S0;S1]++S0::r).
-Proof.
-  unfold even_prefix_clock.
-  replace (4*a+4) with (2*(2*a+1)+2) by lia.
-  rewrite advance_add,paired_even,even_prefix_pair.
-  replace (12*x+3) with (2*(6*x+1)+1) by lia.
-  rewrite advance_add,(positive_page_row (12*x) (4*a+5) []) by lia.
-  replace (12*x+(6*x+1-1)) with (18*x) by lia.
-  replace (2*a+1+1) with (2*a+2) by lia.
-  replace (6*x+1) with (2*(3*x)+1) at 3 by lia.
-  rewrite (positive_page_row (18*x) (4*a+5) [2*a+2]) by lia.
-  replace (18*x+(2*b+3-1)) with (18*x+2*b+2) by lia.
-  replace (6*x+1+1) with (6*x+2) by lia.
-  replace (2*b+3) with (2*(b+1)+1) by lia; reflexivity.
-Qed.
-
-Lemma even_frontier_frame_shield a x b indices s v r :
-  5<=a -> 1<=x -> 2<=b -> Forall (fun z => 1<=z) indices ->
-  exists clock aa rr, 0<clock /\ 24<=aa /\
-    advance clock (counter_pair (4*a+4) (12*x+4)
-      (pure_page (6*x+1) (pure_page (2*b+3) (pure_page (b+3)
-        (frame_pages (2*x-1) indices s v r))))) =
-    shield aa (4*a+6) (6*x+2) rr.
-Proof.
-  intros Ha Hx Hb Hindices.
-  destruct (leading_page_frames_return indices Hindices (2*x-1) (18*x+2*b+2)
-    (4*a+5) [6*x+2;2*a+2] (3*x) b s v r ltac:(lia))
-    as [clock [delta [rr [Hclock Hreturn]]]].
-  exists (even_prefix_clock a x b+clock),(18*x+2*b+2+delta+1),rr.
-  split; [lia |]; split; [lia |].
-  cbn [app] in Hreturn.
-  rewrite advance_add,even_page_prefix,Hreturn.
-  unfold shield; cbn [saved_pages].
-  replace (4*a+5+1) with (4*a+6) by lia.
-  replace ((4*a+6)/2-1) with (2*a+2); [reflexivity |].
-  replace (4*a+6) with ((2*a+3)*2) by lia.
-  rewrite Nat.div_mul by lia; lia.
-Qed.
-
-Ltac literal_nat n := lazymatch n with
-  | O => idtac | S ?m => literal_nat m end.
-
-Ltac expand_constant_copies :=
-  match goal with |- context[copies ?n ?w] =>
-    let k := eval cbv [Nat.add Nat.mul Nat.sub] in n in
-    literal_nat k; change (copies n w) with (copies k w);
-    cbn [copies app]
-  end.
-
-Ltac prefix_word_eq :=
-  first [reflexivity |
-    progress cbn [app]; prefix_word_eq |
-    progress (repeat rewrite <- app_assoc); prefix_word_eq |
-    match goal with |- context[copies ?n ?w] =>
-      let H := fresh in assert (H : n=0) by lia;
-      rewrite H; clear H; cbn [copies app]; prefix_word_eq end |
-    expand_constant_copies; prefix_word_eq |
-    lazymatch goal with
-    | |- ?a::?xs = ?a::?ys => f_equal; prefix_word_eq
-    | |- copies ?n ?w++?a = copies ?m ?w++?b =>
-      first [apply copies_prefix_eq; [lia | prefix_word_eq] |
-        apply copies_prefix_left; [lia | prefix_word_eq] |
-        apply copies_prefix_right; [lia | prefix_word_eq]]
-    | |- copies ?n ?w++?a = _ =>
-      rewrite (copies_peel n w a) by lia; prefix_word_eq
-    | |- _ = copies ?n ?w++?a =>
-      rewrite (copies_peel n w a) by lia; prefix_word_eq
-    end].
-
-Ltac prefix_config_eq :=
-  unfold counter_pair, paired_frontier, G, tilted, carried, W, core_suffix,
-    saved_body, odd_outer, row, saved_pages, page, pure_page, page_header;
-  repeat first [rewrite core_bits_app | rewrite core_bits_threes |
-    rewrite pushed_core_app | rewrite pushed_threes |
-    progress cbn [core_bits block_bits pushed_core pushed_bits app] |
-    rewrite <- app_assoc];
-  f_equal; prefix_word_eq.
-
-Ltac one_constant_power :=
-  match goal with |- context[copies ?n ?w] =>
-    let k := eval cbv [Nat.add Nat.mul Nat.sub] in n in
-    literal_nat k;
-    let rhs := eval cbv [copies app] in (copies k w) in
-    change (copies n w) with rhs; cbn [app]
-  end.
-
-Ltac prefix_word_eq_fast :=
-  first [reflexivity |
-    progress cbn [app]; prefix_word_eq_fast |
-    progress (repeat rewrite <- app_assoc); prefix_word_eq_fast |
-    lazymatch goal with
-    | |- ?a::?xs = ?a::?ys => f_equal; prefix_word_eq_fast
-    | |- copies ?n ?w++?a = copies ?m ?w++?b =>
-      first [apply copies_prefix_eq; [lia | prefix_word_eq_fast] |
-        apply copies_prefix_left; [lia | prefix_word_eq_fast] |
-        apply copies_prefix_right; [lia | prefix_word_eq_fast]]
-    end |
-    match goal with |- context[copies ?n ?w] =>
-      let H := fresh in assert (H : n=0) by lia;
-      rewrite H; clear H; change (copies 0 w) with (@nil Sym);
-      cbn [app]; prefix_word_eq_fast end |
-    one_constant_power; prefix_word_eq_fast |
-    match goal with |- context[copies ?n ?w++?tail] =>
-      progress (rewrite (copies_slide n w)); prefix_word_eq_fast end |
-    lazymatch goal with
-    | |- copies ?n ?w++?a = _ =>
-      rewrite (copies_peel n w a) by lia; prefix_word_eq_fast
-    | |- _ = copies ?n ?w++?a =>
-      rewrite (copies_peel n w a) by lia; prefix_word_eq_fast
-    end].
-
-Ltac prefix_config_eq_fast :=
-  unfold pure_page, counter_pair, paired_frontier, G, tilted, carried, W,
-    core_suffix, saved_body, odd_outer, row, saved_pages, page, page_header;
-  repeat first [rewrite core_bits_app | rewrite core_bits_threes |
-    rewrite pushed_core_app | rewrite pushed_threes |
-    progress cbn [core_bits block_bits pushed_core pushed_bits app] |
-    rewrite <- app_assoc];
-  f_equal; prefix_word_eq_fast.
-
-Lemma Qrun_strong_bounds x y r xf yf rf n t :
-  QRun x y r xf yf rf n t -> 6<=x -> 13<=y -> 6<=xf /\ 13<=yf.
-Proof.
-  intro Hrun; induction Hrun; intros Hx Hy; [lia |apply IHHrun; lia].
-Qed.
-
-Lemma Qrun_strong_chain x y r xf yf rf n t :
-  QRun x y r xf yf rf n t -> 6<=x -> 13<=y ->
-  forall indices s v tail, r=exit_chain (x-1) indices s v tail ->
-    Forall (fun z => 5<=z) indices ->
-  exists output_indices,
-    Forall (fun z => 5<=z) output_indices /\
-    length output_indices=length indices+n /\
-    rf=exit_chain (xf-1) output_indices s v tail.
-Proof.
-  intro Hrun; induction Hrun; intros Hx Hy indices s v tail Htail Hindices.
-  - exists indices; split; [exact Hindices |]; split; [lia |exact Htail].
-  - destruct (IHHrun ltac:(lia) ltac:(lia) ((x-1)::indices) s v tail)
-      as [output_indices [Hpositive [Hlength Houtput]]].
-    + rewrite Htail; apply qframe_exit_chain; lia.
-    + constructor; [lia |exact Hindices].
-    + exists output_indices; split; [exact Hpositive |].
-      split; [cbn [length] in Hlength; lia |exact Houtput].
-Qed.
-
-Lemma Q_strong_chain_exit x y indices s v r :
-  6<=x -> 13<=y -> Forall (fun z => 5<=z) indices ->
-  exists xf b output_indices n t,
-    6<=xf /\ 6<=b /\ Forall (fun z => 5<=z) output_indices /\
-    length output_indices=length indices+n /\
-    QRun x y (exit_chain (x-1) indices s v r)
-      xf (2*b+1) (exit_chain (xf-1) output_indices s v r) n t /\
-    advance t (Qfront x y (exit_chain (x-1) indices s v r)) =
-      Qfront xf (2*b+1) (exit_chain (xf-1) output_indices s v r).
-Proof.
-  intros Hx Hy Hindices.
-  destruct (Q_positive_phase_exit x y (exit_chain (x-1) indices s v r) ltac:(lia) ltac:(lia))
-    as [xf [b [rf [n [t [Hrun Hxf]]]]]].
-  destruct (Qrun_strong_chain _ _ _ _ _ _ _ _ Hrun Hx Hy indices s v r eq_refl Hindices)
-    as [output_indices [Hpositive [Hlength Htail]]].
-  destruct (Qrun_strong_bounds _ _ _ _ _ _ _ _ Hrun Hx Hy) as [Hxf2 Hyf].
-  exists xf,b,output_indices,n,t; rewrite <- Htail.
-  repeat split; try assumption; try lia.
-  apply Qrun_sound with (n:=n); exact Hrun.
-Qed.
+Lemma pure_page_row a b gaps n m c r :
+  tilted (row a (gaps++[b])++[Three]) n
+    ([0;1]^^(2*m+1) *> [0] *> pure_page (1+c) r) -->+
+  tilted (row (a+c) (((n+1)::gaps)++[b])++[Three]) m ([0;1]^^(1+c) *> [0] *> r).
+Proof. rewrite pure_page_header. apply page_row. Qed.
 
 Definition even_stage k x b r :=
   tilted (row (18*x+2*b+2) [6*x+2;k+1;2*k+3]++[Three]) (3*x)
-    (copies (2*(b+1)+1) [S0;S1]++S0::r).
-Definition even_stage_clock k x b :=
-  (56*k*k+352*k+687+12*x*(42*k+14*(12*x)+194))+
-  (page_clock (row (12*x) [2*k+3]) k (6*x+1) (6*x+1)+
-   page_clock (row (18*x) [k+1;2*k+3]) (6*x+1) (3*x) (2*b+3)).
+    ([0;1]^^(2*(b+1)+1) *> [0] *> r).
 
 Lemma even_stage_pair k x :
-  repeat Three (12*x)++Six::repeat Three (2*k+4) =
-  row (12*x) [2*k+3]++[Three].
+  [Three]^^(12*x)++Six::[Three]^^(2*k+4) = row (12*x) [2*k+3]++[Three].
 Proof.
-  cbn [row]; replace (2*k+4) with (S (2*k+3)) by lia.
-  rewrite threes_succ_end; repeat rewrite <- app_assoc; reflexivity.
+  cbn[row]. replace (2*k+4) with ((2*k+3)+1) by lia.
+  rewrite (@lpow_add _ (2*k+3) 1 [Three]).
+  repeat first [rewrite <- app_assoc | progress cbn[app lpow]]. reflexivity.
 Qed.
 
 Lemma even_stage_return k x b r :
-  advance (even_stage_clock k x b)
-    (counter_pair (2*k+2) (12*x+4) (pure_page (6*x+1) (pure_page (2*b+3) r))) =
+  counter_pair (2*k+2) (12*x+4) (pure_page (6*x+1) (pure_page (2*b+3) r)) -->+
   even_stage k x b r.
 Proof.
-  unfold even_stage_clock,even_stage.
-  rewrite advance_add,paired_even,even_stage_pair.
+  follow11 paired_even. rewrite even_stage_pair.
   replace (12*x+3) with (2*(6*x+1)+1) by lia.
-  rewrite advance_add,(positive_page_row (12*x) (2*k+3) []) by lia.
-  replace (12*x+(6*x+1-1)) with (18*x) by lia.
-  replace (6*x+1) with (2*(3*x)+1) at 3 by lia.
-  rewrite (positive_page_row (18*x) (2*k+3) [k+1]) by lia.
-  replace (18*x+(2*b+3-1)) with (18*x+2*b+2) by lia.
+  replace (6*x+1) with (1+6*x) at 2 by lia.
+  follow11 (pure_page_row (12*x) (2*k+3) []).
+  replace (12*x+6*x) with (18*x) by lia.
+  replace (1+6*x) with (2*(3*x)+1) by lia.
+  replace (2*b+3) with (1+(2*b+2)) by lia.
+  follow10 (pure_page_row (18*x) (2*k+3) [k+1]).
+  unfold even_stage. replace (18*x+(2*b+2)) with (18*x+2*b+2) by lia.
   replace (6*x+1+1) with (6*x+2) by lia.
-  replace (2*b+3) with (2*(b+1)+1) by lia; reflexivity.
+  replace (1+(2*b+2)) with (2*(b+1)+1) by lia. finish.
 Qed.
 
 Definition odd_stage h x b r :=
   tilted (row (18*x+2*b-2) [6*x+2;h+2;h;h+1;2*h+7]++[Three]) (3*x)
-    (copies (2*(b+1)+1) [S0;S1]++S0::r).
-Definition odd_stage_clock h x b :=
-  (168*(h+1)*(h+1)+904*(h+1)+1723+(12*x-4)*(70*(h+1)+14*(12*x-4)+316))+
-  (page_clock (row (12*x-4) [h;h+1;2*h+7]) (h+1) (6*x+1) (6*x+1)+
-   page_clock (row (18*x-4) [h+2;h;h+1;2*h+7]) (6*x+1) (3*x) (2*b+3)).
+    ([0;1]^^(2*(b+1)+1) *> [0] *> r).
 
 Lemma odd_stage_pair h x :
-  repeat Three (12*x-4)++odd_outer h =
-  row (12*x-4) [h;h+1;2*h+7]++[Three].
+  [Three]^^(12*x-4)++odd_outer h = row (12*x-4) [h;h+1;2*h+7]++[Three].
 Proof.
-  unfold odd_outer; cbn [row].
-  assert (Hlast : repeat Three (h+1)=repeat Three h++[Three]) by
-    (replace (h+1) with (S h) by lia; apply threes_succ_end).
-  rewrite Hlast at 2; repeat rewrite <- app_assoc; reflexivity.
+  unfold odd_outer. cbn[row].
+  rewrite (@lpow_add _ h 1 [Three]) at 2.
+  repeat first [rewrite <- app_assoc | progress cbn[app lpow]]. reflexivity.
 Qed.
 
 Lemma odd_stage_return h x b r : 1<=x ->
-  advance (odd_stage_clock h x b)
-    (counter_pair (2*h+3) (12*x+4) (pure_page (6*x+1) (pure_page (2*b+3) r))) =
+  counter_pair (2*h+3) (12*x+4) (pure_page (6*x+1) (pure_page (2*b+3) r)) -->+
   odd_stage h x b r.
 Proof.
-  intro Hx; unfold odd_stage_clock,odd_stage.
-  replace (12*x+4) with ((12*x-4)+8) by lia.
-  rewrite advance_add,paired_odd,odd_stage_pair.
+  intro Hx. replace (12*x+4) with ((12*x-4)+8) by lia.
+  follow11 paired_odd. rewrite odd_stage_pair.
   replace (12*x-4+7) with (2*(6*x+1)+1) by lia.
-  rewrite advance_add,(positive_page_row (12*x-4) (2*h+7) [h;h+1]) by lia.
-  replace (12*x-4+(6*x+1-1)) with (18*x-4) by lia.
+  replace (6*x+1) with (1+6*x) at 2 by lia.
+  follow11 (pure_page_row (12*x-4) (2*h+7) [h;h+1]).
+  replace (12*x-4+6*x) with (18*x-4) by lia.
   replace (h+1+1) with (h+2) by lia.
-  replace (6*x+1) with (2*(3*x)+1) at 3 by lia.
-  rewrite (positive_page_row (18*x-4) (2*h+7) [h+2;h;h+1]) by lia.
-  replace (18*x-4+(2*b+3-1)) with (18*x+2*b-2) by lia.
+  replace (1+6*x) with (2*(3*x)+1) by lia.
+  replace (2*b+3) with (1+(2*b+2)) by lia.
+  follow10 (pure_page_row (18*x-4) (2*h+7) [h+2;h;h+1]).
+  unfold odd_stage. replace (18*x-4+(2*b+2)) with (18*x+2*b-2) by lia.
   replace (6*x+1+1) with (6*x+2) by lia.
-  replace (2*b+3) with (2*(b+1)+1) by lia; reflexivity.
+  replace (1+(2*b+2)) with (2*(b+1)+1) by lia. finish.
+Qed.
+
+Lemma even_frontier_frame_shield a x b indices s v r :
+  5<=a -> 1<=x -> 2<=b -> Forall (fun z => 1<=z) indices ->
+  exists aa rr, 24<=aa /\
+    counter_pair (4*a+4) (12*x+4)
+      (pure_page (6*x+1) (pure_page (2*b+3) (pure_page (b+3)
+        (frame_pages (2*x-1) indices s v r)))) -->+ shield aa (4*a+6) (6*x+2) rr.
+Proof.
+  intros Ha Hx Hb Hindices.
+  destruct (leading_page_frames_return indices Hindices (2*x-1) (18*x+2*b+2)
+    (4*a+5) [6*x+2;2*a+2] (3*x) b s v r ltac:(lia)) as [delta [rr H]].
+  exists (18*x+2*b+2+delta+1),rr. split; [lia|].
+  replace (4*a+4) with (2*(2*a+1)+2) by lia. follow11 even_stage_return.
+  unfold even_stage. replace (2*a+1+1) with (2*a+2) by lia.
+  replace (2*(2*a+1)+3) with (4*a+5) by lia. follow10 H.
+  unfold shield. cbn[saved_pages].
+  replace (4*a+5+1) with (4*a+6) by lia.
+  replace ((4*a+6)/2-1) with (2*a+2); [finish|].
+  replace (4*a+6) with ((2*a+3)*2) by lia. rewrite Nat.div_mul by lia. lia.
 Qed.
 
 Lemma frame_pages_header t indices s v r : 2<=t ->
-  exists d tail, frame_pages t indices s v r=page_header (d+2) tail.
+  exists d tail, frame_pages t indices s v r = page_header (d+2) tail.
 Proof.
-  intro Ht; destruct indices as [|z indices]; cbn [frame_pages];
-    rewrite pure_page_header.
-  - exists (t-1),(S0::page_header (t+3) (frame_body s v r)).
-    replace (t-1+2) with (t+1) by lia; reflexivity.
-  - exists (t-2),(S0::pure_page (t+4) (frame_pages z indices s v r)).
-    replace (t-2+2) with t by lia; reflexivity.
+  intro Ht. destruct indices as [|z indices]; cbn[frame_pages]; rewrite pure_page_header.
+  - exists (t-1),([0] *> page_header (t+3) (frame_body s v r)).
+    replace (t-1+2) with (t+1) by lia. reflexivity.
+  - exists (t-2),([0] *> pure_page (t+4) (frame_pages z indices s v r)).
+    replace (t-2+2) with t by lia. reflexivity.
 Qed.
 
 Lemma odd_page_frames_prefix indices t a b gaps n m h s v r :
   1<=t -> Forall (fun z => 1<=z) indices ->
-  exists clock aa tail, 0<clock /\ a+2*h+3<=aa /\
-    advance clock (tilted (row a (gaps++[b])++[Three]) n
-      (copies (2*m+1) [S0;S1]++S0::
-        pure_page (2*h+3) (frame_pages t indices s v r))) =
+  exists aa tail, a+2*h+3<=aa /\
+    tilted (row a (gaps++[b])++[Three]) n
+      ([0;1]^^(2*m+1) *> [0] *> pure_page (2*h+3) (frame_pages t indices s v r)) -->+
     counter_pair aa (b+1) (saved_pages gaps (pure_page (n+1) tail)).
 Proof.
   intros Ht Hindices.
   destruct (frame_pages_return indices Hindices t (a+2*h+2) b ((n+1)::gaps)
-    m (h+1) s v r Ht) as [clock [delta [tail [Hclock Hreturn]]]].
-  exists (page_clock (row a (gaps++[b])) n m (2*h+3)+clock),
-    (a+2*h+2+delta+1),tail.
-  split; [lia |]; split; [lia |].
-  rewrite advance_add,positive_page_row by lia.
-  replace (a+(2*h+3-1)) with (a+2*h+2) by lia.
-  replace (2*h+3) with (2*(h+1)+1) by lia.
-  rewrite Hreturn; cbn [saved_pages]; reflexivity.
+    m (h+1) s v r Ht) as [delta [tail H]].
+  exists (a+2*h+2+delta+1),tail. split; [lia|].
+  replace (2*h+3) with (1+(2*h+2)) by lia.
+  follow11 pure_page_row.
+  replace (a+(2*h+2)) with (a+2*h+2) by lia.
+  replace (1+(2*h+2)) with (2*(h+1)+1) by lia. exact H.
 Qed.
 
 Lemma even_page_header_return a b gaps n m z d r :
-  Progress (tilted (row a (gaps++[b])++[Three]) n
-    (copies (2*m+1) [S0;S1]++S0::pure_page (2*z+2) (page_header (d+2) r)))
-    (counter_pair (a+2*z+2) (b+1)
-      (saved_pages gaps (pure_page (n+2) (saved_body m (z+1) (repeat Three d) r)))).
+  tilted (row a (gaps++[b])++[Three]) n
+    ([0;1]^^(2*m+1) *> [0] *> pure_page (2*z+2) (page_header (d+2) r)) -->+
+  counter_pair (a+2*z+2) (b+1)
+    (saved_pages gaps (pure_page (n+2) (saved_body m (z+1) ([Three]^^d) r))).
 Proof.
-  exists (page_clock (row a (gaps++[b])) n m (2*z+2)+
-    (4*m+30*(z+1)+2*weight (repeat Three d)+113+
-     row_clock (a+(2*z+1)) (((n+2)::gaps)++[b]))).
-  split; [lia |].
-  rewrite advance_add,positive_page_row by lia.
-  replace (a+(2*z+2-1)) with (a+(2*z+1)) by lia.
-  replace (2*z+2) with (2*(z+1)) by lia.
-  rewrite header_core.
-  cbn [app]; rewrite row_last_three.
-  replace (S (n+1)) with (n+2) by lia.
-  rewrite (T_core_odd_frontier (a+(2*z+1)) b ((n+2)::gaps)).
-  unfold paired_frontier,counter_pair,G; cbn [saved_pages].
-  replace (S (a+(2*z+1))) with (a+2*z+2) by lia.
-  replace (S b) with (b+1) by lia; reflexivity.
+  replace (2*z+2) with (1+(2*z+1)) by lia. follow11 pure_page_row.
+  replace (1+(2*z+1)) with (2*(z+1)) by lia. rewrite header_core.
+  cbn[app]. rewrite row_last_three. replace (n+1+1) with (n+2) by lia.
+  follow10 (T_odd_frontier (a+(2*z+1)) b ((n+2)::gaps)).
+  replace (1+(a+(2*z+1))) with (a+2*z+2) by lia.
+  replace (1+b) with (b+1) by lia. finish.
 Qed.
 
 Lemma even_page_frames_prefix indices t a b gaps n m h s v r :
   2<=t -> exists tail,
-  Progress (tilted (row a (gaps++[b])++[Three]) n
-    (copies (2*m+1) [S0;S1]++S0::
-      pure_page (2*h+4) (frame_pages t indices s v r)))
-    (counter_pair (a+2*h+4) (b+1) (saved_pages gaps (pure_page (n+2) tail))).
+  tilted (row a (gaps++[b])++[Three]) n
+    ([0;1]^^(2*m+1) *> [0] *> pure_page (2*h+4) (frame_pages t indices s v r)) -->+
+  counter_pair (a+2*h+4) (b+1) (saved_pages gaps (pure_page (n+2) tail)).
 Proof.
-  intro Ht; destruct (frame_pages_header t indices s v r Ht) as [d [tail Hform]].
-  exists (saved_body m (h+2) (repeat Three d) tail).
-  rewrite Hform.
+  intro Ht. destruct (frame_pages_header t indices s v r Ht) as [d [tail Hform]].
+  exists (saved_body m (h+2) ([Three]^^d) tail). rewrite Hform.
   replace (2*h+4) with (2*(h+1)+2) by lia.
   replace (a+2*h+4) with (a+2*(h+1)+2) by lia.
-  replace (h+2) with (h+1+1) by lia.
-  apply even_page_header_return.
+  replace (h+2) with (h+1+1) by lia. apply even_page_header_return.
 Qed.
 
 Lemma odd_even_header_return a b gaps n m h z d r :
-  Progress (tilted (row a (gaps++[b])++[Three]) n
-    (copies (2*m+1) [S0;S1]++S0::
-      pure_page (2*h+3) (pure_page (2*z+2) (page_header (d+2) r))))
-    (counter_pair (a+2*h+2*z+4) (b+1)
-      (saved_pages gaps (pure_page (n+1) (pure_page (m+2)
-        (saved_body (h+1) (z+1) (repeat Three d) r))))).
+  tilted (row a (gaps++[b])++[Three]) n
+    ([0;1]^^(2*m+1) *> [0] *> pure_page (2*h+3) (pure_page (2*z+2) (page_header (d+2) r))) -->+
+  counter_pair (a+2*h+2*z+4) (b+1)
+    (saved_pages gaps (pure_page (n+1) (pure_page (m+2)
+      (saved_body (h+1) (z+1) ([Three]^^d) r)))).
 Proof.
-  destruct (even_page_header_return (a+2*h+2) b ((n+1)::gaps) m (h+1) z d r)
-    as [clock [Hclock Hreturn]].
-  exists (page_clock (row a (gaps++[b])) n m (2*h+3)+clock).
-  split; [lia |].
-  rewrite advance_add,positive_page_row by lia.
-  replace (a+(2*h+3-1)) with (a+2*h+2) by lia.
-  replace (2*h+3) with (2*(h+1)+1) by lia.
-  rewrite Hreturn; cbn [saved_pages].
-  replace (a+2*h+2+2*z+2) with (a+2*h+2*z+4) by lia; reflexivity.
+  replace (2*h+3) with (1+(2*h+2)) by lia. follow11 pure_page_row.
+  replace (a+(2*h+2)) with (a+2*h+2) by lia.
+  replace (1+(2*h+2)) with (2*(h+1)+1) by lia.
+  follow10 (even_page_header_return (a+2*h+2) b ((n+1)::gaps)).
+  replace (a+2*h+2+2*z+2) with (a+2*h+2*z+4) by lia. finish.
 Qed.
 
 Lemma odd_triple_frames_prefix indices t a b gaps h x s v r :
   1<=x -> 1<=t -> Forall (fun z => 1<=z) indices ->
-  exists clock aa tail, 0<clock /\ a+2*h+4*x+3<=aa /\
-    advance clock (tilted (row a (gaps++[b])++[Three]) (3*x)
-      (copies (2*(2*h+1)+1) [S0;S1]++S0::
-        pure_page (2*h+3) (pure_page (2*x-1) (pure_page (2*x+3)
-          (frame_pages t indices s v r))))) =
+  exists aa tail, a+2*h+4*x+3<=aa /\
+    tilted (row a (gaps++[b])++[Three]) (3*x)
+      ([0;1]^^(2*(2*h+1)+1) *> [0] *> pure_page (2*h+3)
+        (pure_page (2*x-1) (pure_page (2*x+3) (frame_pages t indices s v r)))) -->+
     counter_pair aa (b+1) (saved_pages gaps
       (pure_page (3*x+1) (pure_page (2*h+2) (pure_page (h+2) tail)))).
 Proof.
   intros Hx Ht Hindices.
   destruct (frame_pages_return indices Hindices t (a+2*h+4*x+2) b
-    ((h+2)::(2*h+2)::(3*x+1)::gaps) (x-1) (x+1) s v r Ht)
-    as [clock [delta [tail [Hclock Hreturn]]]].
-  exists (page_clock (row a (gaps++[b])) (3*x) (2*h+1) (2*h+3)+
-    (page_clock (row (a+2*h+2) (((3*x+1)::gaps)++[b])) (2*h+1) (h+1) (2*x-1)+
-     (page_clock (row (a+2*h+2*x) (((2*h+2)::(3*x+1)::gaps)++[b])) (h+1) (x-1) (2*x+3)+clock))),
-    (a+2*h+4*x+2+delta+1),tail.
-  split; [lia |]; split; [lia |].
-  rewrite advance_add,positive_page_row by lia.
-  replace (a+(2*h+3-1)) with (a+2*h+2) by lia.
-  replace (2*h+3) with (2*(h+1)+1) by lia.
-  rewrite advance_add,positive_page_row by lia.
-  replace (a+2*h+2+(2*x-1-1)) with (a+2*h+2*x) by lia.
+    ((h+2)::(2*h+2)::(3*x+1)::gaps) (x-1) (x+1) s v r Ht) as [delta [tail H]].
+  exists (a+2*h+4*x+2+delta+1),tail. split; [lia|].
+  replace (2*h+3) with (1+(2*h+2)) by lia. follow11 pure_page_row.
+  replace (a+(2*h+2)) with (a+2*h+2) by lia.
+  replace (1+(2*h+2)) with (2*(h+1)+1) by lia.
+  replace (2*x-1) with (1+(2*x-2)) by lia.
+  follow11 (pure_page_row (a+2*h+2) b ((3*x+1)::gaps)).
+  replace (a+2*h+2+(2*x-2)) with (a+2*h+2*x) by lia.
   replace (2*h+1+1) with (2*h+2) by lia.
-  replace (2*x-1) with (2*(x-1)+1) by lia.
-  rewrite advance_add,positive_page_row by lia.
-  replace (a+2*h+2*x+(2*x+3-1)) with (a+2*h+4*x+2) by lia.
+  replace (1+(2*x-2)) with (2*(x-1)+1) by lia.
+  replace (2*x+3) with (1+(2*x+2)) by lia.
+  follow11 (pure_page_row (a+2*h+2*x) b ((2*h+2)::(3*x+1)::gaps)).
+  replace (a+2*h+2*x+(2*x+2)) with (a+2*h+4*x+2) by lia.
   replace (h+1+1) with (h+2) by lia.
-  replace (2*x+3) with (2*(x+1)+1) by lia.
-  rewrite Hreturn; cbn [saved_pages]; reflexivity.
+  replace (1+(2*x+2)) with (2*(x+1)+1) by lia. exact H.
 Qed.
 
 Definition q_pages_front a x b indices s v r :=
   counter_pair a (12*x+4) (pure_page (6*x+1) (pure_page (2*b+3)
     (pure_page (b+3) (frame_pages (2*x-1) indices s v r)))).
-
 Definition K5front a c x h r := counter_pair a (2*c+2)
-  (pure_page c (pure_page (6*x+2) (pure_page (3*x+1)
-    (pure_page (2*h+2) (pure_page (h+2) r))))).
+  (pure_page c (pure_page (6*x+2) (pure_page (3*x+1) (pure_page (2*h+2) (pure_page (h+2) r))))).
 Definition O5front a k x offset r := counter_pair a (2*k+6)
-  (pure_page k (pure_page (k-1) (pure_page (k+1)
-    (pure_page (6*x+2) (pure_page (3*x+offset) r))))).
+  (pure_page k (pure_page (k-1) (pure_page (k+1) (pure_page (6*x+2) (pure_page (3*x+offset) r))))).
 Definition KEmptyFront c x h r := counter_pair (20*x+6*h+4) (2*c+2)
   (pure_page c (pure_page (6*x+2) (pure_page (3*x+1)
-    (pure_page (2*h+3) (saved_body (h+1) x (repeat Three (2*x)) r))))).
+    (pure_page (2*h+3) (saved_body (h+1) x ([Three]^^(2*x)) r))))).
 Definition BOddNonemptyFront c x h r := counter_pair (18*x+6*h+8) (2*c+2)
   (pure_page c (pure_page (6*x+2) (pure_page (3*x+2)
-    (saved_body (2*h+2) (h+2) (repeat Three (2*x-3))
-      (S0::pure_page (2*x+3) r))))).
+    (saved_body (2*h+2) (h+2) ([Three]^^(2*x-3)) ([0] *> pure_page (2*x+3) r))))).
 Definition BOddEmptyFront c x h r := counter_pair (18*x+6*h+8) (2*c+2)
   (pure_page c (pure_page (6*x+2) (pure_page (3*x+2)
-    (saved_body (2*h+2) (h+2) (repeat Three (2*x-2))
-      (S0::page_header (2*x+2) r))))).
+    (saved_body (2*h+2) (h+2) ([Three]^^(2*x-2)) ([0] *> page_header (2*x+2) r))))).
 
-Lemma even_stage_progress k x b r :
-  Progress (counter_pair (2*k+2) (12*x+4)
-    (pure_page (6*x+1) (pure_page (2*b+3) r))) (even_stage k x b r).
-Proof.
-  exists (even_stage_clock k x b); split;
-    [unfold even_stage_clock; lia |apply even_stage_return].
-Qed.
+Ltac align := first [reflexivity | lia |
+  progress cbn[app saved_pages frame_pages]; align |
+  progress f_equal; align].
+Ltac follow_aligned H :=
+  let T := type of H in
+  lazymatch T with ?c -->+ _ =>
+    lazymatch goal with |- ?g -->+ _ => replace g with c by align; follow10 H end
+  end.
 
 Lemma q_pages_even_nonempty k x h z indices s v r :
   3<=x -> 3<=h -> 1<=z -> Forall (fun n => 1<=n) indices ->
   exists aa tail, 24<=aa /\
-    Progress (q_pages_front (2*k+2) x (2*h) (z::indices) s v r)
-      (K5front aa (k+1) x h tail).
+    q_pages_front (2*k+2) x (2*h) (z::indices) s v r -->+ K5front aa (k+1) x h tail.
 Proof.
   intros Hx Hh Hz Hindices.
   destruct (odd_triple_frames_prefix indices z (18*x+2*(2*h)+2) (2*k+3)
-    [6*x+2;k+1] h x s v r ltac:(lia) Hz Hindices)
-    as [clock [aa [tail [Hclock [Haa Hreturn]]]]].
-  exists aa,tail; split; [lia |].
-  unfold q_pages_front; eapply progress_trans; [apply even_stage_progress |].
-  eapply progress_rule.
-  - exact Hreturn.
-  - exact Hclock.
-  - unfold even_stage; cbn [frame_pages]; prefix_config_eq_fast.
-  - unfold K5front; prefix_config_eq_fast.
+    [6*x+2;k+1] h x s v r ltac:(lia) Hz Hindices) as [aa [tail [Ha H]]].
+  exists aa,tail. split; [lia|]. unfold q_pages_front. follow11 even_stage_return.
+  unfold even_stage. cbn[frame_pages]. follow_aligned H.
+  unfold K5front,pure_page. cbn[saved_pages]. finish; align.
 Qed.
 
 Lemma q_pages_bodd_nonempty k x h z indices s v r : 2<=x ->
-  Progress (q_pages_front (2*k+2) x (2*h+1) (z::indices) s v r)
-    (BOddNonemptyFront (k+1) x h (frame_pages z indices s v r)).
+  q_pages_front (2*k+2) x (2*h+1) (z::indices) s v r -->+
+  BOddNonemptyFront (k+1) x h (frame_pages z indices s v r).
 Proof.
-  intro Hx.
-  destruct (even_page_header_return (18*x+2*(2*h+1)+2) (2*k+3) [6*x+2;k+1]
+  intro Hx. unfold q_pages_front. follow11 even_stage_return.
+  pose proof (even_page_header_return (18*x+2*(2*h+1)+2) (2*k+3) [6*x+2;k+1]
     (3*x) (2*h+2) (h+1) (2*x-3)
-    (S0::pure_page (2*x+3) (frame_pages z indices s v r)))
-    as [clock [Hclock Hreturn]].
-  unfold q_pages_front; eapply progress_trans; [apply even_stage_progress |].
-  eapply progress_rule.
-  - exact Hreturn.
-  - exact Hclock.
-  - unfold even_stage; cbn [frame_pages]; prefix_config_eq_fast.
-  - unfold BOddNonemptyFront; prefix_config_eq_fast.
+    ([0] *> pure_page (2*x+3) (frame_pages z indices s v r))) as H.
+  unfold even_stage. cbn[frame_pages]. rewrite (pure_page_header (2*x-1)).
+  follow_aligned H. unfold BOddNonemptyFront,pure_page. cbn[saved_pages]. finish; align.
 Qed.
 
 Lemma q_pages_bodd_empty k x h s v r : 2<=x ->
-  Progress (q_pages_front (2*k+2) x (2*h+1) [] s v r)
-    (BOddEmptyFront (k+1) x h (frame_body s v r)).
+  q_pages_front (2*k+2) x (2*h+1) [] s v r -->+ BOddEmptyFront (k+1) x h (frame_body s v r).
 Proof.
-  intro Hx.
-  destruct (even_page_header_return (18*x+2*(2*h+1)+2) (2*k+3) [6*x+2;k+1]
-    (3*x) (2*h+2) (h+1) (2*x-2)
-    (S0::page_header (2*x+2) (frame_body s v r)))
-    as [clock [Hclock Hreturn]].
-  unfold q_pages_front; eapply progress_trans; [apply even_stage_progress |].
-  eapply progress_rule.
-  - exact Hreturn.
-  - exact Hclock.
-  - unfold even_stage; cbn [frame_pages]; prefix_config_eq_fast.
-  - unfold BOddEmptyFront; prefix_config_eq_fast.
-Qed.
-
-Lemma odd_stage_progress h x b r : 1<=x ->
-  Progress (counter_pair (2*h+3) (12*x+4)
-    (pure_page (6*x+1) (pure_page (2*b+3) r))) (odd_stage h x b r).
-Proof.
-  intro Hx; exists (odd_stage_clock h x b); split;
-    [unfold odd_stage_clock; lia |apply odd_stage_return; exact Hx].
+  intro Hx. unfold q_pages_front. follow11 even_stage_return.
+  pose proof (even_page_header_return (18*x+2*(2*h+1)+2) (2*k+3) [6*x+2;k+1]
+    (3*x) (2*h+2) (h+1) (2*x-2) ([0] *> page_header (2*x+2) (frame_body s v r))) as H.
+  unfold even_stage. cbn[frame_pages]. rewrite (pure_page_header (2*x-1+1)).
+  follow_aligned H. unfold BOddEmptyFront,pure_page. cbn[saved_pages]. finish; align.
 Qed.
 
 Lemma q_pages_even_empty k x h s v r : 2<=x ->
-  Progress (q_pages_front (2*k+2) x (2*h) [] s v r)
-    (KEmptyFront (k+1) x h (frame_body s v r)).
+  q_pages_front (2*k+2) x (2*h) [] s v r -->+ KEmptyFront (k+1) x h (frame_body s v r).
 Proof.
-  intro Hx; unfold q_pages_front.
-  eapply progress_trans; [apply even_stage_progress |].
-  unfold even_stage; cbn [frame_pages].
-  replace (2*x-1+1) with (2*(x-1)+2) by lia.
-  replace (2*x-1+3) with (2*x+2) by lia.
+  intro Hx. unfold q_pages_front. follow11 even_stage_return.
+  unfold even_stage. cbn[frame_pages].
   pose proof (odd_even_header_return (18*x+2*(2*h)+2) (2*k+3) [6*x+2;k+1]
-    (3*x) (2*h+1) h (x-1) (2*x) (frame_body s v r)) as Hreturn.
-  destruct Hreturn as [clock [Hclock Hreturn]].
-  eapply progress_rule.
-  - exact Hreturn.
-  - exact Hclock.
-  - prefix_config_eq.
-  - unfold KEmptyFront,pure_page; prefix_config_eq.
+    (3*x) (2*h+1) h (x-1) (2*x) (frame_body s v r)) as H.
+  follow_aligned H. unfold KEmptyFront,pure_page. cbn[saved_pages]. finish; align.
 Qed.
 
 Lemma q_pages_odd k x b indices s v r :
   11<=k -> 3<=x -> 6<=b -> Forall (fun n => 1<=n) indices ->
-  exists aa offset tail, 24<=aa /\ (offset=1 \/ offset=2) /\
-    Progress (q_pages_front (2*k+3) x b indices s v r)
-      (O5front aa (k+1) x offset tail).
+  exists aa (offset:nat) tail, 24<=aa /\ (offset=1%nat \/ offset=2) /\
+    q_pages_front (2*k+3) x b indices s v r -->+ O5front aa (k+1) x offset tail.
 Proof.
   intros Hk Hx Hb Hindices.
-  pose proof (Nat.div_mod b 2 ltac:(lia)) as Hdivide.
-  pose proof (Nat.mod_upper_bound b 2 ltac:(lia)) as Hmod.
-  remember (b/2) as h.
-  assert (Hcases : b=2*h \/ b=2*h+1) by lia.
+
+
+  remember (b/2) as h. assert (Hcases : b=2*h \/ b=2*h+1) by lia.
   destruct Hcases as [Hform|Hform]; subst b.
   - destruct (odd_page_frames_prefix indices (2*x-1) (18*x+2*(2*h)-2)
       (2*k+7) [6*x+2;k+2;k;k+1] (3*x) (2*h+1) h s v r ltac:(lia) Hindices)
-      as [clock [aa [tail [Hclock [Haa Hreturn]]]]].
-    exists aa,1,tail; split; [lia |]; split; [left; reflexivity |].
-    unfold q_pages_front; eapply progress_trans; [apply odd_stage_progress; lia |].
-    eapply progress_rule.
-    + exact Hreturn.
-    + exact Hclock.
-    + unfold odd_stage; prefix_config_eq_fast.
-    + unfold O5front; prefix_config_eq_fast.
+      as [aa [tail [Ha H]]].
+    exists aa,1%nat,tail. split; [lia|]. split; [left; reflexivity|].
+    unfold q_pages_front.
+    follow11 (odd_stage_return k x (2*h)
+      (pure_page (2*h+3) (frame_pages (2*x-1) indices s v r)) ltac:(lia)).
+    unfold odd_stage. follow_aligned H. unfold O5front,pure_page. cbn[saved_pages]. finish; align.
   - destruct (even_page_frames_prefix indices (2*x-1) (18*x+2*(2*h+1)-2)
-      (2*k+7) [6*x+2;k+2;k;k+1] (3*x) (2*h+2) h s v r ltac:(lia))
-      as [tail [clock [Hclock Hreturn]]].
+      (2*k+7) [6*x+2;k+2;k;k+1] (3*x) (2*h+2) h s v r ltac:(lia)) as [tail H].
     exists (18*x+2*(2*h+1)-2+2*h+4),2,tail.
-    split; [lia |]; split; [right; reflexivity |].
-    unfold q_pages_front; eapply progress_trans; [apply odd_stage_progress; lia |].
-    eapply progress_rule.
-    + exact Hreturn.
-    + exact Hclock.
-    + unfold odd_stage; prefix_config_eq_fast.
-    + unfold O5front; prefix_config_eq_fast.
+    split; [lia|]. split; [right; reflexivity|].
+    unfold q_pages_front.
+    follow11 (odd_stage_return k x (2*h+1)
+      (pure_page (2*h+1+3) (frame_pages (2*x-1) indices s v r)) ltac:(lia)).
+    unfold odd_stage. follow_aligned H. unfold O5front,pure_page. cbn[saved_pages]. finish; align.
 Qed.
 
-Record aff := Aff { a0:nat; a1:nat; a2:nat; a3:nat; a4:nat }.
-Definition val a (v:list nat) :=
-  a0 a+a1 a*nth 0 v 0+a2 a*nth 1 v 0+a3 a*nth 2 v 0+a4 a*nth 3 v 0.
-Definition cn n := Aff n 0 0 0 0.
-Definition plus a b := Aff (a0 a+a0 b) (a1 a+a1 b) (a2 a+a2 b)
-  (a3 a+a3 b) (a4 a+a4 b).
-Definition scale k a := Aff (k*a0 a) (k*a1 a) (k*a2 a) (k*a3 a) (k*a4 a).
-Definition minus a b := Aff (a0 a-a0 b) (a1 a-a1 b) (a2 a-a2 b)
-  (a3 a-a3 b) (a4 a-a4 b).
-Definition below a b := (a0 a<=?a0 b)&&(a1 a<=?a1 b)&&(a2 a<=?a2 b)&&
-  (a3 a<=?a3 b)&&(a4 a<=?a4 b).
-Definition zero a := below a (cn 0).
-Definition constant a := match a1 a,a2 a,a3 a,a4 a with
-  | 0,0,0,0 => Some (a0 a) | _,_,_,_ => None end.
-
-Lemma val_cn n v : val (cn n) v=n.
-Proof. unfold val,cn; cbn; lia. Qed.
-Lemma val_plus a b v : val (plus a b) v=val a v+val b v.
-Proof. destruct a,b; unfold val,plus; cbn; nia. Qed.
-Lemma val_scale k a v : val (scale k a) v=k*val a v.
-Proof. destruct a; unfold val,scale; cbn; nia. Qed.
-Lemma plus_minus a b : below b a=true -> plus (minus a b) b=a.
-Proof.
-  destruct a,b; unfold below,plus,minus; cbn.
-  repeat rewrite andb_true_iff; repeat rewrite Nat.leb_le.
-  intros [[[[H0 H1] H2] H3] H4]; f_equal; lia.
-Qed.
-Lemma val_minus a b v : below b a=true -> val (minus a b) v=val a v-val b v.
-Proof.
-  intro H; pose proof (f_equal (fun x=>val x v) (plus_minus a b H)) as E.
-  change (val (plus (minus a b) b) v=val a v) in E.
-  rewrite val_plus in E; lia.
-Qed.
-Lemma val_zero a v : zero a=true -> val a v=0.
-Proof.
-  intro H; pose proof (plus_minus (cn 0) a H) as E.
-  apply (f_equal (fun x=>val x v)) in E.
-  change (val (plus (minus (cn 0) a) a) v=val (cn 0) v) in E.
-  rewrite val_plus,val_cn in E; lia.
-Qed.
-Lemma val_constant a n v : constant a=Some n -> val a v=n.
-Proof.
-  destruct a as [c d e f g]; unfold constant; cbn.
-  destruct d,e,f,g; try discriminate; intro H; inversion H; apply val_cn.
-Qed.
-
-Inductive ne := C (n:nat) | X (i:nat) | Add (a b:ne) | Mul (a b:ne) | Sub (a b:ne).
-Fixpoint nv e v := match e with
-  | C n=>n | X i=>nth i v 0 | Add a b=>nv a v+nv b v
-  | Mul a b=>nv a v*nv b v | Sub a b=>nv a v-nv b v end.
-Fixpoint norm e : option aff := match e with
-  | C n=>Some(cn n)
-  | X 0=>Some(Aff 0 1 0 0 0) | X 1=>Some(Aff 0 0 1 0 0)
-  | X 2=>Some(Aff 0 0 0 1 0) | X 3=>Some(Aff 0 0 0 0 1) | X _=>None
-  | Add x y => match norm x,norm y with
-    | Some a,Some b=>Some(plus a b) | _,_=>None end
-  | Mul x y => match norm x,norm y with
-    | Some a,Some b=>match constant a with
-      | Some k=>Some(scale k b)
-      | None=>match constant b with Some k=>Some(scale k a) | None=>None end end
-    | _,_=>None end
-  | Sub x y=>match norm x,norm y with
-    | Some a,Some b=>if below b a then Some(minus a b) else None
-    | _,_=>None end end.
-
-Lemma norm_sound e a : norm e=Some a -> forall v, nv e v=val a v.
-Proof.
-  revert a; induction e; intros a H v; cbn in H.
-  - inversion H; subst; cbn [nv]; symmetry; apply val_cn.
-  - destruct i as [|[|[|[|i]]]]; try discriminate; inversion H; subst;
-      unfold val; cbn [nv a0 a1 a2 a3 a4]; lia.
-  - destruct (norm e1) as [p|] eqn:Hp; try discriminate.
-    destruct (norm e2) as [q|] eqn:Hq; try discriminate.
-    inversion H; cbn [nv]; rewrite (IHe1 p eq_refl v),(IHe2 q eq_refl v),val_plus; reflexivity.
-  - destruct (norm e1) as [p|] eqn:Hp; try discriminate.
-    destruct (norm e2) as [q|] eqn:Hq; try discriminate.
-    cbn [nv]; rewrite (IHe1 p eq_refl v),(IHe2 q eq_refl v).
-    destruct (constant p) as [k|] eqn:Hk.
-    + inversion H; rewrite val_scale,(val_constant p k v Hk); reflexivity.
-    + destruct (constant q) as [k|] eqn:Hqk; try discriminate.
-      inversion H; rewrite val_scale,(val_constant q k v Hqk); nia.
-  - destruct (norm e1) as [p|] eqn:Hp; try discriminate.
-    destruct (norm e2) as [q|] eqn:Hq; try discriminate.
-    destruct (below q p) eqn:Hle; try discriminate.
-    inversion H; cbn [nv]; rewrite (IHe1 p eq_refl v),(IHe2 q eq_refl v).
-    symmetry; apply val_minus; exact Hle.
-Qed.
-
-Fixpoint bits_eq x y := match x,y with
-  | [],[]=>true | a::x,b::y=>sym_eqb a b&&bits_eq x y | _,_=>false end.
-Lemma bits_eq_sound x y : bits_eq x y=true -> x=y.
-Proof.
-  revert y; induction x; destruct y; cbn; try discriminate; auto.
-  rewrite andb_true_iff; intros [H T]; apply (proj2 (Bool.reflect_iff _ _ (sym_eqb_spec _ _))) in H; subst.
-  f_equal; apply IHx; exact T.
-Qed.
-
-Inductive atom := Rep (a:aff) (w:list Sym) | Tail.
-Definition av t v r := match t with Rep a w=>copies (val a v) w | Tail=>r end.
-Fixpoint run xs v r := match xs with []=>[] | x::xs=>av x v r++run xs v r end.
-Lemma run_app xs ys v r : run (xs++ys) v r=run xs v r++run ys v r.
-Proof. induction xs; cbn; [reflexivity|rewrite IHxs,app_assoc; reflexivity]. Qed.
-Lemma copies_nil n : copies n (@nil Sym)=[].
-Proof. induction n; cbn; auto. Qed.
-Lemma copies_twice n w : copies n (w++w)=copies (2*n) w.
-Proof.
-  induction n; [reflexivity|].
-  replace (2*S n) with (S(S(2*n))) by lia.
-  cbn [copies]; rewrite IHn; repeat rewrite app_assoc; reflexivity.
-Qed.
-Definition power a w :=
-  if bits_eq w [S0;S1;S0;S1] then [Rep (scale 2 a) [S0;S1]] else
-  if bits_eq w [S1;S0;S1;S0] then [Rep (scale 2 a) [S1;S0]] else [Rep a w].
-Lemma power_sound a w v r : run (power a w) v r=copies (val a v) w.
-Proof.
-  unfold power; destruct (bits_eq w [S0;S1;S0;S1]) eqn:H.
-  - apply bits_eq_sound in H; subst; cbn [run av]; rewrite app_nil_r,val_scale.
-    symmetry; apply (copies_twice (val a v) [S0;S1]).
-  - destruct (bits_eq w [S1;S0;S1;S0]) eqn:H2.
-    + apply bits_eq_sound in H2; subst; cbn [run av]; rewrite app_nil_r,val_scale.
-      symmetry; apply (copies_twice (val a v) [S1;S0]).
-    + cbn [run av]; apply app_nil_r.
-Qed.
-
-Inductive ce := CNil | CCat (a b:ce) | CBlock (b:block) | CRepeat (n:ne).
-Fixpoint cv c v := match c with
-  | CNil=>[] | CCat a b=>cv a v++cv b v | CBlock b=>[b]
-  | CRepeat n=>repeat Three (nv n v) end.
-Definition view (rev:bool) c := if rev then pushed_core c else core_bits c.
-Definition bitview (rev:bool) b := if rev then pushed_bits b else block_bits b.
-Lemma view_app rev a b : view rev (a++b)=
-  if rev then view rev b++view rev a else view rev a++view rev b.
-Proof. destruct rev; unfold view; [apply pushed_core_app|apply core_bits_app]. Qed.
-Lemma view_repeat rev n : view rev (repeat Three n)=copies n (bitview rev Three).
-Proof. destruct rev; unfold view,bitview; [apply pushed_threes|apply core_bits_threes]. Qed.
-Lemma view_block rev b : view rev [b]=bitview rev b.
-Proof. destruct rev,b; reflexivity. Qed.
-Fixpoint compile_core (rev:bool) c : option (list atom) := match c with
-  | CNil=>Some [] | CBlock b=>Some(power (cn 1) (bitview rev b))
-  | CRepeat n=>match norm n with Some a=>Some(power a (bitview rev Three)) | None=>None end
-  | CCat a b=>match compile_core rev a,compile_core rev b with
-    | Some x,Some y=>Some(if rev then y++x else x++y) | _,_=>None end end.
-Lemma compile_core_sound c rev xs : compile_core rev c=Some xs ->
-  forall v r, view rev (cv c v)=run xs v r.
-Proof.
-  revert xs; induction c; intros xs H v r; cbn [compile_core] in H.
-  - inversion H; subst; destruct rev; reflexivity.
-  - destruct (compile_core rev c1) as [p|] eqn:Hp; try discriminate.
-    destruct (compile_core rev c2) as [q|] eqn:Hq; try discriminate.
-    inversion H; subst; cbn [cv]; rewrite view_app.
-    rewrite (IHc1 p eq_refl v r),(IHc2 q eq_refl v r).
-    destruct rev; apply eq_sym; apply run_app.
-  - inversion H; subst; cbn [cv]; rewrite power_sound,val_cn,view_block.
-    cbn [copies]; symmetry; apply app_nil_r.
-  - destruct (norm n) as [a|] eqn:Ha; try discriminate.
-    inversion H; subst; cbn [cv]; rewrite power_sound,view_repeat,(norm_sound n a Ha v); reflexivity.
-Qed.
-
-Inductive we := Empty | Cat (a b:we) | Pow (n:ne) (w:list Sym) | Rest
-  | Core (rev:bool) (c:ce).
-Fixpoint wv e v r := match e with
-  | Empty=>[] | Cat a b=>wv a v r++wv b v r | Pow n w=>copies (nv n v) w | Rest=>r
-  | Core rev c=>view rev (cv c v) end.
-Fixpoint compile e : option (list atom) := match e with
-  | Empty=>Some [] | Rest=>Some [Tail]
-  | Core rev c=>compile_core rev c
-  | Pow n w=>match norm n with Some a=>Some(power a w) | None=>None end
-  | Cat a b=>match compile a,compile b with Some x,Some y=>Some(x++y) | _,_=>None end end.
-Lemma compile_sound e xs : compile e=Some xs -> forall v r, wv e v r=run xs v r.
-Proof.
-  revert xs; induction e; intros xs H v r; cbn in H.
-  - inversion H; reflexivity.
-  - destruct (compile e1) as [p|] eqn:Hp; try discriminate.
-    destruct (compile e2) as [q|] eqn:Hq; try discriminate.
-    inversion H; cbn [wv]; rewrite (IHe1 p eq_refl v r),(IHe2 q eq_refl v r),run_app; reflexivity.
-  - destruct (norm n) as [a|] eqn:Ha; try discriminate.
-    inversion H; cbn [wv]; rewrite (norm_sound n a Ha v),power_sound; reflexivity.
-  - inversion H; cbn [wv run av]; symmetry; apply app_nil_r.
-  - cbn [wv]; apply compile_core_sound; exact H.
-Qed.
-
-Definition empty_atom x := match x with Rep a w=>zero a||match w with []=>true | _=>false end | Tail=>false end.
-Lemma empty_atom_sound x : empty_atom x=true -> forall v r, av x v r=[].
-Proof.
-  destruct x as [a w|]; cbn; try discriminate; rewrite orb_true_iff; intros [H|H] v r.
-  - rewrite (val_zero a v H); reflexivity.
-  - destruct w; try discriminate; apply copies_nil.
-Qed.
-Fixpoint trim xs := match xs with
-  | []=>[] | x::ys=>if empty_atom x then trim ys else xs end.
-Lemma trim_sound xs v r : run (trim xs) v r=run xs v r.
-Proof.
-  induction xs as [|x xs IH]; [reflexivity|]; cbn [trim].
-  destruct (empty_atom x) eqn:H; [|reflexivity].
-  cbn [run]; rewrite (empty_atom_sound x H v r); cbn; exact IH.
-Qed.
-
-Definition cancel xs ys : option (list atom*list atom) := match xs,ys with
-  | Tail::xs,Tail::ys=>Some(xs,ys)
-  | Rep a w::xs,Rep b z::ys=>if bits_eq w z then
-      if below a b then Some(xs,Rep (minus b a) z::ys) else
-      if below b a then Some(Rep (minus a b) w::xs,ys) else None
-    else None
-  | _,_=>None end.
-Lemma count_split a b w v : below a b=true ->
-  copies (val b v) w=copies (val a v) w++copies (val (minus b a) v) w.
-Proof.
-  intro H; pose proof (plus_minus b a H) as E.
-  apply (f_equal (fun x=>val x v)) in E.
-  change (val (plus (minus b a) a) v=val b v) in E.
-  rewrite val_plus in E.
-  replace (val b v) with (val a v+val (minus b a) v) by lia; apply copies_add.
-Qed.
-Lemma cancel_sound xs ys p q : cancel xs ys=Some(p,q) ->
-  forall v r, run p v r=run q v r -> run xs v r=run ys v r.
-Proof.
-  destruct xs as [|x xs]; [destruct ys as [|[b z|] ys]; discriminate|].
-  destruct ys as [|y ys]; [destruct x; discriminate|].
-  destruct x as [a w|],y as [b z|]; cbn [cancel]; try discriminate.
-  - destruct (bits_eq w z) eqn:Hw; try discriminate.
-    apply bits_eq_sound in Hw; subst z.
-    destruct (below a b) eqn:Hab.
-    + intro H; inversion H; subst; intros v r E; cbn [run av] in *.
-      rewrite (count_split a b w v Hab),<-app_assoc,E; reflexivity.
-    + destruct (below b a) eqn:Hba; try discriminate.
-      intro H; inversion H; subst; intros v r E; cbn [run av] in *.
-      rewrite (count_split b a w v Hba),<-app_assoc,E; reflexivity.
-  - intro H; inversion H; subst; intros v r E; cbn [run av]; rewrite E; reflexivity.
-Qed.
-
-Lemma rotate_copies n b w r :
-  copies n (b::w)++b::r=b::(copies n (w++[b])++r).
-Proof.
-  induction n; [reflexivity|]; cbn [copies].
-  cbn [app]; repeat rewrite <-app_assoc.
-  rewrite IHn; cbn [app]; repeat rewrite <-app_assoc; reflexivity.
-Qed.
-Definition dec a := Aff (a0 a-1) (a1 a) (a2 a) (a3 a) (a4 a).
-Lemma val_dec a v : 0<a0 a -> val a v=S(val (dec a) v).
-Proof. destruct a; unfold val,dec; cbn; lia. Qed.
-
-Fixpoint expose xs : option (Sym*list atom) := match xs with
-  | []=>None | Tail::_=>None
-  | Rep a []::ys=>expose ys
-  | Rep a (b::w)::ys=>if zero a then expose ys else
-    match a0 a with
-    | S _=>Some(b,Rep (cn 1) w::Rep (dec a) (b::w)::ys)
-    | 0=>match expose ys with
-      | Some(c,zs)=>if sym_eqb b c then Some(b,Rep a (w++[b])::zs) else None
-      | None=>None end end end.
-Lemma expose_sound xs b ys : expose xs=Some(b,ys) ->
-  forall v r, run xs v r=b::run ys v r.
-Proof.
-  revert b ys; induction xs as [|x xs IH]; intros b ys H v r; try discriminate.
-  destruct x as [a w|]; try discriminate; destruct w as [|c w].
-  - cbn [expose] in H; cbn [run av]; rewrite copies_nil; cbn; apply IH; exact H.
-  - cbn [expose] in H; destruct (zero a) eqn:Hz.
-    + cbn [run av]; rewrite (val_zero a v Hz); cbn [copies app]; apply IH; exact H.
-    + destruct (a0 a) eqn:Hn.
-      * destruct (expose xs) as [[d zs]|] eqn:He; try discriminate.
-        destruct (sym_eqb c d) eqn:Hcd; try discriminate.
-        apply (proj2 (Bool.reflect_iff _ _ (sym_eqb_spec _ _))) in Hcd; subst d; inversion H; subst.
-        cbn [run av]; rewrite (IH b zs eq_refl v r); apply rotate_copies.
-      * inversion H; subst; cbn [run av]; rewrite (val_dec a v ltac:(lia)),val_cn.
-        cbn [copies]; repeat rewrite <-app_assoc; reflexivity.
-Qed.
-
-Definition both_empty (xs ys:list atom) := match xs,ys with [],[]=>true | _,_=>false end.
-Fixpoint word_check fuel xs ys := match fuel with
-  | 0=>false
-  | S fuel=>let x:=trim xs in let y:=trim ys in
-    if both_empty x y then true else
-    match cancel x y with
-    | Some(p,q)=>word_check fuel p q
-    | None=>match expose x,expose y with
-      | Some(b,p),Some(c,q)=>sym_eqb b c&&word_check fuel p q
-      | _,_=>false end end end.
-Lemma word_check_sound fuel xs ys : word_check fuel xs ys=true ->
-  forall v r, run xs v r=run ys v r.
-Proof.
-  revert xs ys; induction fuel as [|fuel IH]; intros xs ys H v r; try discriminate.
-  cbn [word_check] in H.
-  rewrite <-(trim_sound xs v r),<-(trim_sound ys v r).
-  remember (trim xs) as x in *; remember (trim ys) as y in *.
-  destruct (both_empty x y) eqn:He.
-  - destruct x,y; try discriminate; reflexivity.
-  - destruct (cancel x y) as [[p q]|] eqn:Hc.
-    + eapply cancel_sound; [exact Hc|]; apply IH; exact H.
-    + destruct (expose x) as [[b p]|] eqn:Hx; try discriminate.
-      destruct (expose y) as [[c q]|] eqn:Hy; try discriminate.
-      apply andb_true_iff in H; destruct H as [Hbc Hrest].
-      apply (proj2 (Bool.reflect_iff _ _ (sym_eqb_spec _ _))) in Hbc; subst c.
-      rewrite (expose_sound x b p Hx v r),(expose_sound y b q Hy v r).
-      f_equal; apply IH; exact Hrest.
-Qed.
-
-Definition word_equal fuel a b := match compile a,compile b with
-  | Some x,Some y=>word_check fuel x y | _,_=>false end.
-Definition fuel := 10000.
-Lemma word_equal_sound fuel a b : word_equal fuel a b=true ->
-  forall v r, wv a v r=wv b v r.
-Proof.
-  unfold word_equal; destruct (compile a) as [x|] eqn:Hx; try discriminate.
-  destruct (compile b) as [y|] eqn:Hy; try discriminate.
-  intros H v r; rewrite (compile_sound a x Hx v r),(compile_sound b y Hy v r).
-  apply (word_check_sound fuel x y H v r).
-Qed.
-Definition lit bits := Pow (C 1) bits.
-Definition addn x n := Add x (C n).
-Definition succ x := Add (C 1) x.
-Definition twice x n := Add (Mul (C 2) x) (C n).
-Definition conscore b c := CCat (CBlock b) c.
-Definition cs := (we*we)%type.
-Definition denote (s:cs) v r := cfg D (wv (fst s) v r) S0 (wv (snd s) v r).
-Definition pair a b r : cs := (Empty,
-  Cat (lit [S1;S1;S1;S1;S0])
-    (Cat (Pow a [S1;S1;S1;S0])
-      (Cat (lit [S0]) (Cat (Pow b [S1;S1;S1;S0]) (Cat (lit [S0;S0]) r))))).
-Definition tilt w n r : cs :=
-  (Cat (lit [S0;S1]) (Cat (Pow (addn n 2) [S0;S1;S0;S1])
-    (Cat (lit [S1;S0;S1;S0;S1]) (Cat (Core true w) (lit [S0;S1])))),r).
-Definition carry w r : cs :=
-  (Cat (lit [S0;S0;S1]) (Cat (Core true w) (lit [S0;S1])),r).
-Definition wfront w r : cs :=
-  (Empty,Cat (lit [S1;S0]) (Cat (Core false w) (Cat (lit [S0]) r))).
-Definition suffix m v r := Cat (Pow m [S0;S1])
-  (Cat (Core false (conscore Three (CCat v (CBlock Three)))) (Cat (lit [S0]) r)).
-Definition body n m v r := Cat (lit [S1;S1;S1;S1;S0])
-  (Cat (Pow (succ n) [S1;S1;S1;S0]) (Cat (lit [S0])
-    (Cat (Pow (succ m) [S1;S1;S1;S0]) (Cat (lit [S1;S1;S1;S1;S1;S1;S0])
-      (Cat (Core false v) (Cat (lit [S0;S0;S1;S0;S1]) r)))))).
-Definition pg b r := Cat (lit [S1;S1;S1;S1;S0])
-  (Cat (Core false (CRepeat b)) (Cat (lit [S0;S0]) r)).
-Fixpoint pages gaps r := match gaps with []=>r | b::bs=>pages bs (pg b r) end.
-Fixpoint crow a gaps := match gaps with
-  | []=>CRepeat a | b::bs=>CCat (crow a bs) (conscore Six (CRepeat b)) end.
-Definition outer h := conscore Six (CCat (CRepeat (twice h 7))
-  (conscore Six (CCat (CRepeat (addn h 1)) (conscore Six (CRepeat (addn h 1)))))).
-
-Lemma denote_pair a b t v r : denote (pair a b t) v r=counter_pair (nv a v) (nv b v) (wv t v r).
-Proof. reflexivity. Qed.
-Lemma denote_tilt w n t v r : denote (tilt w n t) v r=tilted (cv w v) (nv n v) (wv t v r).
-Proof. reflexivity. Qed.
-Lemma denote_carry w t v r : denote (carry w t) v r=carried (cv w v) (wv t v r).
-Proof. reflexivity. Qed.
-Lemma denote_wfront w t v r : denote (wfront w t) v r=W (cv w v) (wv t v r).
-Proof. reflexivity. Qed.
-Lemma value_suffix m c t v r : wv (suffix m c t) v r=core_suffix (nv m v) (cv c v) (wv t v r).
-Proof. reflexivity. Qed.
-Lemma value_body n m c t v r : wv (body n m c t) v r=saved_body (nv n v) (nv m v) (cv c v) (wv t v r).
-Proof. reflexivity. Qed.
-Lemma value_crow a gaps v : cv (crow a gaps) v=row (nv a v) (map (fun e=>nv e v) gaps).
-Proof. induction gaps; cbn [crow cv row map conscore]; [reflexivity|rewrite IHgaps; reflexivity]. Qed.
-Lemma value_outer h v : cv (outer h) v=odd_outer (nv h v).
-Proof. reflexivity. Qed.
-Lemma value_pages gaps t v r : wv (pages gaps t) v r=saved_pages (map (fun e=>nv e v) gaps) (wv t v r).
-Proof.
-  revert t; induction gaps; intro t; [reflexivity|].
-  cbn [pages map saved_pages]; rewrite IHgaps; unfold pg,page; cbn [wv lit nv cv view];
-    repeat rewrite <-app_assoc; reflexivity.
-Qed.
-Lemma pair_front a b t v r : denote (pair (succ a) (succ b) t) v r=
-  paired_frontier (nv a v) (nv b v) (wv t v r).
-Proof. reflexivity. Qed.
-
-Inductive instruction :=
-| PE (k b:ne) (t:we)
-| PO (h b:ne) (t:we)
-| TE (w:ce) (n m:ne) (v:ce) (t:we)
-| CR (u v:ce) (t:we)
-| WM (w:ce) (n b:ne) (t:we)
-| TO (a b:ne) (gaps:list ne) (n m:ne) (v:ce) (t:we)
-| PP (u:ce) (n m c:ne) (t:we).
-
-Definition instruction_source i : cs := match i with
-| PE k b t=>pair (twice k 2) (addn b 4) t
-| PO h b t=>pair (twice h 3) (addn b 8) t
-| TE w n m v t=>tilt w n (suffix (twice m 2) v t)
-| CR u v t=>carry (CCat u (CBlock Three))
-    (Cat (Core false (CCat v (CBlock Three))) (Cat (lit [S0]) t))
-| WM w n b t=>wfront (CCat (CCat w (conscore Six (CCat (CRepeat n) (CBlock Six)))) (CRepeat b)) t
-| TO a b gaps n m v t=>tilt (crow a (gaps++[b])) n (suffix (twice m 1) (CCat v (CBlock Three)) t)
-| PP u n m c t=>tilt (CCat u (CBlock Three)) n
-    (Cat (Pow (twice m 1) [S0;S1]) (Cat (lit [S0;S1;S1;S1;S1;S0])
-      (Cat (Pow c [S1;S1;S1;S0]) (Cat (lit [S0]) t)))) end.
-
-Definition instruction_target i : cs := match i with
-| PE k b t=>tilt (CCat (CRepeat b) (conscore Six (CRepeat (twice k 4)))) k
-    (Cat (Pow (addn b 3) [S0;S1]) (Cat (lit [S0]) t))
-| PO h b t=>tilt (CCat (CRepeat b) (outer h)) (addn h 1)
-    (Cat (Pow (addn b 7) [S0;S1]) (Cat (lit [S0]) t))
-| TE w n m v t=>carry w (Cat (Pow (addn n 2) [S1;S1;S1;S0])
-    (Cat (lit [S1;S1;S1;S1;S1;S1;S0]) (Cat (Pow m [S1;S1;S1;S0])
-      (Cat (lit [S1;S1;S1;S1;S1;S1;S0]) (Cat (Core false v) (Cat (lit [S0;S0;S1]) t))))))
-| CR u v t=>wfront (conscore Three (CCat u (conscore Six v))) (Cat (lit [S0;S1]) t)
-| WM w n b t=>tilt (CCat (CRepeat b) w) n (Cat (Pow b [S0;S1]) t)
-| TO a b gaps n m v t=>pair (succ a) (succ b) (pages gaps (body n m v t))
-| PP u n m c t=>tilt (CCat (CRepeat (Sub c (C 1))) (CCat u (conscore Six (CRepeat (addn n 2))))) m
-    (Cat (Pow c [S0;S1]) t) end.
-
-Definition instruction_valid i := match i with
-  | PP _ _ _ c _=>match norm c with Some a=>0<?a0 a | None=>false end
-  | _=>true end.
-Lemma valid_positive c : (match norm c with Some a=>0<?a0 a | None=>false end)=true ->
-  forall v, 0<nv c v.
-Proof.
-  destruct (norm c) as [a|] eqn:H; try discriminate.
-  intros Hpos v; apply Nat.ltb_lt in Hpos; rewrite (norm_sound c a H v).
-  unfold val; lia.
-Qed.
-
-Lemma instruction_sound i : instruction_valid i=true -> forall v r,
-  Progress (denote (instruction_source i) v r) (denote (instruction_target i) v r).
-Proof.
-  destruct i; intros Hvalid env r; cbn [instruction_source instruction_target].
-  - rewrite !denote_pair,!denote_tilt; cbn [cv conscore nv twice addn wv lit].
-    eexists; split; [|apply paired_even]; lia.
-  - rewrite !denote_pair,!denote_tilt; cbn [cv]; rewrite value_outer; cbn [nv twice addn wv lit].
-    eexists; split; [|apply paired_odd]; lia.
-  - rewrite denote_tilt,denote_carry,value_suffix; cbn [nv twice wv addn lit view].
-    eexists; split; [|apply T_core_even]; lia.
-  - rewrite denote_carry,denote_wfront; cbn [cv conscore wv lit view].
-    eexists; split; [|apply carried_return]; lia.
-  - rewrite denote_wfront,denote_tilt; cbn [cv conscore wv].
-    eexists; split; [|apply W_multi_six_phase]; lia.
-  - rewrite denote_tilt,pair_front,value_crow,value_suffix,value_pages,value_body,map_app.
-    cbn [map cv nv twice]; eexists; split; [|apply T_core_odd_frontier]; lia.
-  - pose proof (valid_positive c Hvalid env) as Hc.
-    rewrite !denote_tilt; cbn [cv conscore nv addn twice wv lit].
-    eexists; split; [|apply T_positive_page; exact Hc]; unfold page_clock; nia.
-Qed.
-
-Definition config_equal a b := word_equal fuel (fst a) (fst b)&&word_equal fuel (snd a) (snd b).
-Lemma config_equal_sound a b : config_equal a b=true -> forall v r, denote a v r=denote b v r.
-Proof.
-  unfold config_equal; rewrite andb_true_iff; intros [Hl Hr] v r; unfold denote.
-  rewrite (word_equal_sound fuel _ _ Hl v r),(word_equal_sound fuel _ _ Hr v r); reflexivity.
-Qed.
-Fixpoint path_check current instructions final := match instructions with
-  | []=>false
-  | i::rest=>instruction_valid i&&config_equal current (instruction_source i)&&
-      match rest with []=>config_equal (instruction_target i) final | _=>path_check (instruction_target i) rest final end end.
-Lemma path_check_sound current instructions final : path_check current instructions final=true ->
-  forall v r, Progress (denote current v r) (denote final v r).
-Proof.
-  revert current; induction instructions as [|i rest IH]; intros current H v r; try discriminate.
-  cbn [path_check] in H; apply andb_true_iff in H; destruct H as [Hhead Hrest].
-  apply andb_true_iff in Hhead; destruct Hhead as [Hvalid Hsame].
-  rewrite (config_equal_sound current (instruction_source i) Hsame v r).
-  destruct rest as [|j rest].
-  - rewrite <-(config_equal_sound (instruction_target i) final Hrest v r); apply instruction_sound; exact Hvalid.
-  - eapply progress_trans; [apply instruction_sound; exact Hvalid|].
-    apply IH; exact Hrest.
-Qed.
-Definition aplus n a := plus (cn n) a.
-Definition asub a n := minus a (cn n).
-Definition adiv a n := Aff (a0 a/n) (a1 a/n) (a2 a/n) (a3 a/n) (a4 a/n).
-Definition anorm e := match norm e with Some a=>a | None=>cn 0 end.
-Definition term k i := match k with 0=>[] | 1=>[X i] | _=>[Mul (C k) (X i)] end.
-Definition quote a :=
-  let xs := (if a0 a =? 0 then [] else [C (a0 a)]) ++
-    term (a1 a) 0 ++ term (a2 a) 1 ++ term (a3 a) 2 ++ term (a4 a) 3 in
-  match xs with []=>C 0 | x::xs=>fold_left Add xs x end.
-Fixpoint word xs := match xs with
-  | []=>Empty | [Tail]=>Rest | Tail::xs=>Cat Rest (word xs)
-  | Rep a w::xs=>Cat (Pow (quote a) w) (word xs) end.
-Definition atoms w := match compile w with Some xs=>xs | None=>[] end.
-Definition u := [S1;S1;S1;S0].
-Definition six := [S1;S1;S1;S1;S1;S1;S0].
-Definition alt := [S0;S1].
-Fixpoint join xs ys := match xs,ys with
-  | [],_=>ys | _,[]=>xs | [x],y::ys=>plus x y::ys
-  | x::xs,_=>x::join xs ys end.
-Fixpoint counts c := match c with
-  | CNil=>[cn 0] | CBlock Three=>[cn 1] | CBlock Six=>[cn 0;cn 0]
-  | CRepeat n=>[anorm n] | CCat x y=>join (counts x) (counts y) end.
-Fixpoint core xs := match xs with
-  | []=>CNil | [a]=>CRepeat (quote a)
-  | a::xs=>CCat (CRepeat (quote a)) (CCat (CBlock Six) (core xs)) end.
-Definition reduce_ends xs a b := match xs with
-  | []=>[] | x::xs=>let ys:=rev (asub x a::xs) in
-      match ys with []=>[] | y::ys=>rev (asub y b::ys) end end.
-
-Fixpoint drop (n:aff) xs :=
-  if zero n then xs else match xs with
-  | Rep a w::xs=>
-      if zero a then drop n xs else
-      let width:=List.length w in
-      if below (scale width a) n then drop (minus n (scale width a)) xs else
-      let q:=adiv n width in
-      let rem:=a0 n mod width in
-      if rem =? 0 then Rep (minus a q) w::xs else
-      Rep (cn 1) (skipn rem w)::Rep (minus a (aplus 1 q)) w::xs
-  | _=>xs end.
-Fixpoint mismatch fuel j offset w p := match fuel with
-  | 0=>None
-  | S fuel=>if sym_eqb (nth (j mod List.length w) w S0)
-      (nth ((offset+j) mod List.length p) p S0)
-    then mismatch fuel (S j) offset w p else Some j end.
-Fixpoint matching p xs matched := match xs with
-  | Rep a w::xs=>
-      if zero a then matching p xs matched else
-      let width:=List.length w in
-      match mismatch (width*List.length p) 0 (a0 matched mod List.length p) w p with
-      | None=>matching p xs (plus matched (scale width a))
-      | Some j=>if below (scale width a) (cn j)
-          then matching p xs (plus matched (scale width a))
-          else plus matched (cn j) end
-  | _=>matched end.
-Definition prefix p xs :=
-  let n:=adiv (matching p xs (cn 0)) (List.length p) in
-  (n,drop (scale (List.length p) n) xs).
-Definition starts p xs := 0 <? a0 (fst (prefix p xs)).
-Fixpoint parse_more fuel xs := match fuel with
-  | 0=>([],xs)
-  | S fuel=>if starts six xs then
-      let '(a,ys):=prefix u (drop (cn 7) xs) in
-      let '(cs,zs):=parse_more fuel ys in (a::cs,zs)
-    else ([],xs) end.
-Definition parse_core xs :=
-  let '(a,ys):=prefix u xs in
-  let '(cs,zs):=parse_more 64 ys in (a::cs,zs).
-
-Inductive macro_mode := Pair | Tilt | Carried | WFront.
-Record macro_state := State { mode_of:macro_mode; core_of:list aff; counter:aff; right_of:list atom }.
-Definition reconstruction_start (s:cs) := State Pair [cn 0] (cn 0) (atoms (snd s)).
-Definition infer_instruction s :=
-  let w:=core_of s in let n:=quote (counter s) in let r:=right_of s in
-  match mode_of s with
-  | Pair=>
-      let '(a,r):=prefix u (drop (cn 5) r) in
-      let '(b,r):=prefix u (drop (cn 1) r) in
-      let tail:=word (drop (cn 2) r) in
-      if Nat.even (a0 a)
-      then PE (quote (adiv (asub a 2) 2)) (quote (asub b 4)) tail
-      else PO (quote (adiv (asub a 3) 2)) (quote (asub b 8)) tail
-  | Tilt=>
-      let '(p,r):=prefix alt r in
-      let '(c,r):=parse_core r in
-      let tail:=word (drop (cn 1) r) in
-      if Nat.even (a0 p) then
-        let m:=quote (asub (adiv p 2) 1) in
-        match c with
-        | [a]=>PP (core (reduce_ends w 0 1)) n m (quote (asub a 1)) tail
-        | _=>TE (core w) n m (core (reduce_ends c 1 1)) tail end
-      else TO (quote (nth 0 w (cn 0))) (quote (nth 1 w (cn 0)))
-        (map quote (rev (skipn 2 w))) n (quote (adiv p 2))
-        (core (reduce_ends c 1 2)) tail
-  | Carried=>let '(c,r):=parse_core r in
-      CR (core (reduce_ends w 0 1)) (core (reduce_ends c 0 1)) (word (drop (cn 1) r))
-  | WFront=>
-      let rw:=rev w in
-      let b:=nth 0 rw (cn 0) in let k:=nth 1 rw (cn 0) in
-      let v:=rev (skipn 2 rw) in
-      let width:=aplus (7*(List.length w-1)) (scale 4 (fold_left plus w (cn 0))) in
-      WM (core v) (quote k) (quote b) (word (drop (aplus 3 width) r)) end.
-Definition reconstruction_next i :=
-  let r:=atoms (snd (instruction_target i)) in
-  match i with
-  | PE k b _=>State Tilt (counts (CCat (CRepeat b) (conscore Six (CRepeat (twice k 4))))) (anorm k) r
-  | PO h b _=>State Tilt (counts (CCat (CRepeat b) (outer h))) (anorm (addn h 1)) r
-  | TE w _ _ _ _=>State Carried (counts w) (cn 0) r
-  | CR u v _=>State WFront (counts (conscore Three (CCat u (conscore Six v)))) (cn 0) r
-  | WM w n b _=>State Tilt (counts (CCat (CRepeat b) w)) (anorm n) r
-  | TO _ _ _ _ _ _ _=>State Pair [cn 0] (cn 0) r
-  | PP u n m c _=>State Tilt
-      (counts (CCat (CRepeat (Sub c (C 1))) (CCat u (conscore Six (CRepeat (addn n 2))))))
-      (anorm m) r end.
-Fixpoint reconstruct_instructions n s := match n with
-  | 0=>[] | S n=>let i:=infer_instruction s in i::reconstruct_instructions n (reconstruction_next i) end.
-Definition macro_program n s := reconstruct_instructions n (reconstruction_start s).
-
-Fixpoint subst_n args e := match e with
-  | C n=>C n | X i=>nth i args (C 0)
-  | Add a b=>Add (subst_n args a) (subst_n args b)
-  | Mul a b=>Mul (subst_n args a) (subst_n args b)
-  | Sub a b=>Sub (subst_n args a) (subst_n args b) end.
-Fixpoint subst_c args c := match c with
-  | CNil=>CNil | CBlock b=>CBlock b | CRepeat n=>CRepeat (subst_n args n)
-  | CCat a b=>CCat (subst_c args a) (subst_c args b) end.
-Fixpoint subst_w args tail w := match w with
-  | Empty=>Empty | Rest=>tail
-  | Cat a b=>Cat (subst_w args tail a) (subst_w args tail b)
-  | Pow n w=>Pow (subst_n args n) w | Core b c=>Core b (subst_c args c) end.
-Definition substitute args tail (s:cs) := (subst_w args tail (fst s),subst_w args tail (snd s)).
-Definition values args env := map (fun e=>nv e env) args.
-Lemma nth_values args i env : nv (nth i args (C 0)) env=nth i (values args env) 0.
-Proof. revert i; induction args; intros [|i]; cbn [values map nth nv]; auto. Qed.
-Lemma subst_n_sound args e env : nv (subst_n args e) env=nv e (values args env).
-Proof. induction e; cbn [subst_n nv]; try congruence; apply nth_values. Qed.
-Lemma subst_c_sound args c env : cv (subst_c args c) env=cv c (values args env).
-Proof. induction c; cbn [subst_c cv]; try congruence; rewrite subst_n_sound; reflexivity. Qed.
-Lemma subst_w_sound args tail w env r :
-  wv (subst_w args tail w) env r=wv w (values args env) (wv tail env r).
-Proof.
-  induction w; cbn [subst_w wv]; try congruence.
-  - rewrite subst_n_sound; reflexivity.
-  - rewrite subst_c_sound; reflexivity.
-Qed.
-Lemma substitute_sound args tail s env r :
-  denote (substitute args tail s) env r=denote s (values args env) (wv tail env r).
-Proof. unfold substitute,denote; cbn [fst snd]; rewrite !subst_w_sound; reflexivity. Qed.
-
-Definition target_family shapes c := exists s, In s shapes /\ exists env r, c=denote s env r.
-Definition returns shapes c := exists d, Progress c d /\ target_family shapes d.
-Fixpoint width xs := match xs with
-  | []=>cn 0 | Tail::xs=>width xs
-  | Rep a w::xs=>plus (scale (List.length w) a) (width xs) end.
-Definition fallback : instruction := PE (C 0) (C 0) Rest.
-Definition reconstructed_endpoint shapes steps which args (s:cs) :=
-  let template:=nth which shapes (Empty,Empty) in
-  let output:=instruction_target (last steps fallback) in
-  let cut:=width (atoms (snd (substitute args Empty template))) in
-  let tail:=word (drop cut (atoms (snd output))) in
-  substitute args tail template.
-Definition leaf_check shapes n which args s :=
-  let steps:=macro_program n s in
-  (which <? List.length shapes) && path_check s steps (reconstructed_endpoint shapes steps which args s).
-Lemma leaf_sound shapes n which args s : leaf_check shapes n which args s=true ->
-  forall env r, returns shapes (denote s env r).
-Proof.
-  unfold leaf_check; rewrite andb_true_iff; intros [Hwhich Hpath] env r.
-  exists (denote (reconstructed_endpoint shapes (macro_program n s) which args s) env r); split.
-  - exact (path_check_sound s (macro_program n s) _ Hpath env r).
-  - unfold reconstructed_endpoint; rewrite substitute_sound.
-    exists (nth which shapes (Empty,Empty)); split.
-    + apply nth_In; apply Nat.ltb_lt; exact Hwhich.
-    + eexists; eexists; reflexivity.
-Qed.
-
-Definition shift factor offset e :=
-  let x:=match factor with 0=>C 0 | 1=>e | _=>Mul (C factor) e end in
-  match offset with 0=>x | _=>Add x (C offset) end.
-Definition variables i factor offset :=
-  map (fun j=>if i =? j then shift factor offset (X j) else X j) [0;1;2;3].
-Definition branch i factor offset s := substitute (variables i factor offset) Rest s.
-Lemma parity (P:nat->Prop) :
-  (forall n, P (2*n)) -> (forall n, P (2*n+1)) -> forall n,P n.
-Proof.
-  intros He Ho n.
-  pose proof (Nat.div_mod n 2 ltac:(lia)) as Hd.
-  pose proof (Nat.mod_upper_bound n 2 ltac:(lia)) as Hm.
-  destruct (Nat.eq_dec (n mod 2) 0).
-  - replace n with (2*(n/2)) by lia; apply He.
-  - replace n with (2*(n/2)+1) by lia; apply Ho.
-Qed.
-Lemma zero_positive (P:nat->Prop) : P 0 -> (forall n,P (n+1)) -> forall n,P n.
-Proof. intros Hz Hs [|n]; [exact Hz|replace (S n) with (n+1) by lia; apply Hs]. Qed.
-Definition holds (P:config->Prop) s := forall a b c d r,P (denote s [a;b;c;d] r).
-
-Lemma parity_cover P s i : i<4 -> holds P (branch i 2 0 s) ->
-  holds P (branch i 2 1 s) -> holds P s.
-Proof.
-  intros Hi He Ho; unfold holds in *; unfold branch in He,Ho.
-  setoid_rewrite substitute_sound in He; setoid_rewrite substitute_sound in Ho.
-  destruct i as [|[|[|[|i]]]]; try lia; intros a b c d r.
-  - apply (parity (fun a=>P (denote s [a;b;c;d] r))); intro n;
-      [exact (He n b c d r)|exact (Ho n b c d r)].
-  - apply (parity (fun b=>P (denote s [a;b;c;d] r))); intro n;
-      [exact (He a n c d r)|exact (Ho a n c d r)].
-  - apply (parity (fun c=>P (denote s [a;b;c;d] r))); intro n;
-      [exact (He a b n d r)|exact (Ho a b n d r)].
-  - apply (parity (fun d=>P (denote s [a;b;c;d] r))); intro n;
-      [exact (He a b c n r)|exact (Ho a b c n r)].
-Qed.
-Lemma zero_cover P s i : i<4 -> holds P (branch i 0 0 s) ->
-  holds P (branch i 1 1 s) -> holds P s.
-Proof.
-  intros Hi Hz Hs; unfold holds in *; unfold branch in Hz,Hs.
-  setoid_rewrite substitute_sound in Hz; setoid_rewrite substitute_sound in Hs.
-  destruct i as [|[|[|[|i]]]]; try lia; intros a b c d r.
-  - apply (zero_positive (fun a=>P (denote s [a;b;c;d] r)));
-      [exact (Hz 0 b c d r)|intro n; exact (Hs n b c d r)].
-  - apply (zero_positive (fun b=>P (denote s [a;b;c;d] r)));
-      [exact (Hz a 0 c d r)|intro n; exact (Hs a n c d r)].
-  - apply (zero_positive (fun c=>P (denote s [a;b;c;d] r)));
-      [exact (Hz a b 0 d r)|intro n; exact (Hs a b n d r)].
-  - apply (zero_positive (fun d=>P (denote s [a;b;c;d] r)));
-      [exact (Hz a b c 0 r)|intro n; exact (Hs a b c n r)].
-Qed.
-
-Inductive tree :=
-| Leaf (steps which:nat) (args:list ne)
-| Parity (variable:nat) (even odd:tree)
-| Zero (variable:nat) (zero positive:tree).
-Fixpoint tree_check shapes t s := match t with
-  | Leaf n which args=>leaf_check shapes n which args s
-  | Parity i a b=>(i<?4)&&tree_check shapes a (branch i 2 0 s)&&tree_check shapes b (branch i 2 1 s)
-  | Zero i a b=>(i<?4)&&tree_check shapes a (branch i 0 0 s)&&tree_check shapes b (branch i 1 1 s) end.
-Lemma tree_check_sound shapes t s : tree_check shapes t s=true -> holds (returns shapes) s.
-Proof.
-  revert s; induction t; intros s H.
-  - intros a b c d r; apply leaf_sound with (n:=steps) (which:=which) (args:=args); exact H.
-  - cbn [tree_check] in H; repeat rewrite andb_true_iff in H.
-    destruct H as [[Hi Ha] Hb]; apply Nat.ltb_lt in Hi.
-    apply parity_cover with (i:=variable); [exact Hi|apply IHt1; exact Ha|apply IHt2; exact Hb].
-  - cbn [tree_check] in H; repeat rewrite andb_true_iff in H.
-    destruct H as [[Hi Ha] Hb]; apply Nat.ltb_lt in Hi.
-    apply zero_cover with (i:=variable); [exact Hi|apply IHt1; exact Ha|apply IHt2; exact Hb].
-Qed.
-Definition affine_expr a b c d e := quote (Aff a b c d e).
-Definition shape_S22 : cs := (Empty,word [
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 24 1 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0];
-    Rep (Aff 22 0 4 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 10 0 2 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 6 0 0 1 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Tail]).
-
-Definition shape_H1 : cs := (Empty,word [
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 38 6 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0];
-    Rep (Aff 26 0 2 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 13 0 1 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 15 2 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0];
-    Rep (Aff 7 1 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) six;
-    Rep (Aff 9 2 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 2 0 0 0 0) [S1;S0];
-    Tail]).
-
-Definition prefix_S22 (x0 x1 x2:nat) (r:list Sym) :=
-  (cfg D ([]) S0 ([S1;S1;S1;S1;S0]++copies (24+x0) [S1;S1;S1;S0]++[S0]++copies (22+4*x1) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (10+2*x1) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (6+x2) [S1;S1;S1;S0]++[S0;S0]++r)).
-
-Definition prefix_H1 (x0 x1:nat) (r:list Sym) :=
-  (cfg D ([]) S0 ([S1;S1;S1;S1;S0]++copies (38+6*x0) [S1;S1;S1;S0]++[S0]++copies (26+2*x1) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (13+x1) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (15+2*x0) [S1;S1;S1;S0]++[S0]++copies (7+x0) [S1;S1;S1;S0]++[S1;S1;S1;S1;S1;S1;S0]++copies (9+2*x0) [S1;S1;S1;S0]++[S0;S0]++copies (2) [S1;S0]++r)).
-
-Definition shape_H0 : cs := (Empty,word [
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 28 6 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0];
-    Rep (Aff 26 0 0 2 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 13 0 0 1 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 11 2 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0];
-    Rep (Aff 6 1 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) six;
-    Rep (Aff 4 0 1 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0;S1;S0;S1;S0];
-    Tail]).
-Definition shape_QShield : cs := (Empty,word [
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 38 6 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0];
-    Rep (Aff 30 0 6 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 15 0 3 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 14 2 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0];
-    Rep (Aff 8 1 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) six;
-    Rep (Aff 9 0 2 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0;S1;S0;S1];
-    Rep (Aff 6 0 1 0 0) u;
-    Rep (Aff 1 0 0 0 0) six;
-    Rep (Aff 4 0 0 1 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0;S1;S0;S1;S0];
-    Tail]).
-Definition shape_QH1 : cs := (Empty,word [
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 38 6 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0];
-    Rep (Aff 40 0 6 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 20 0 3 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 14 2 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0];
-    Rep (Aff 8 1 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) six;
-    Rep (Aff 13 0 2 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0;S1;S0;S1];
-    Rep (Aff 7 0 1 0 0) u;
-    Rep (Aff 1 0 0 0 0) six;
-    Rep (Aff 9 0 2 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0;S1;S0;S1;S0];
-    Tail]).
-Definition mixed_target_shapes := [shape_S22;shape_H1;shape_H0;shape_QShield;shape_QH1].
-Definition tree_S22 : tree :=
-  (Parity 0
-  (Leaf 3 2 [affine_expr 0 0 1 0 0; affine_expr 0 0 0 1 0; affine_expr 0 1 0 0 0])
-  (Parity 0
-    (Leaf 6 1 [affine_expr 0 1 0 0 0; affine_expr 0 0 3 0 0])
-    (Parity 1
-      (Leaf 7 0 [affine_expr 28 8 0 0 0; affine_expr 1 0 3 0 0; affine_expr 11 2 0 0 0])
-      (Parity 0
-        (Leaf 12 0 [affine_expr 41 6 18 0 0; affine_expr 8 4 0 0 0; affine_expr 10 0 6 0 0])
-        (Leaf 16 0 [affine_expr 70 10 22 0 0; affine_expr 10 4 0 0 0; affine_expr 10 0 6 0 0]))))).
-Lemma checked_S22 : tree_check mixed_target_shapes tree_S22 shape_S22=true.
-Proof. vm_compute; reflexivity. Qed.
-Definition tree_H1 : tree :=
-  (Parity 1
-  (Parity 0
-    (Parity 1
-      (Leaf 11 1 [affine_expr 6 1 3 0 0; affine_expr 20 9 2 0 0])
-      (Parity 0
-        (Parity 1
-          (Leaf 20 0 [affine_expr 141 64 42 0 0; affine_expr 22 4 12 0 0; affine_expr 28 18 4 0 0])
-          (Leaf 17 0 [affine_expr 131 60 30 0 0; affine_expr 28 4 12 0 0; affine_expr 30 18 4 0 0]))
-        (Leaf 12 0 [affine_expr 92 16 24 0 0; affine_expr 16 9 1 0 0; affine_expr 27 4 6 0 0])))
-    (Leaf 4 0 [affine_expr 27 4 6 0 0; affine_expr 6 3 0 0 0; affine_expr 8 0 2 0 0]))
-  (Leaf 3 4 [affine_expr 0 0 1 0 0; affine_expr 0 1 0 0 0])).
-Lemma checked_H1 : tree_check mixed_target_shapes tree_H1 shape_H1=true.
-Proof. vm_compute; reflexivity. Qed.
-Definition tree_H0 : tree :=
-  (Parity 2
-  (Parity 0
-    (Leaf 4 0 [affine_expr 21 4 0 6 0; affine_expr 2 3 0 0 0; affine_expr 8 0 0 2 0])
-    (Parity 2
-      (Parity 0
-        (Parity 2
-          (Leaf 20 0 [affine_expr 119 64 0 42 0; affine_expr 18 4 0 12 0; affine_expr 24 18 0 4 0])
-          (Leaf 17 0 [affine_expr 113 60 0 30 0; affine_expr 24 4 0 12 0; affine_expr 26 18 0 4 0]))
-        (Leaf 12 0 [affine_expr 76 16 0 24 0; affine_expr 14 9 0 1 0; affine_expr 23 4 0 6 0]))
-      (Leaf 11 1 [affine_expr 7 1 0 3 0; affine_expr 18 9 0 2 0])))
-  (Leaf 3 3 [affine_expr 0 0 0 1 0; affine_expr 0 1 0 0 0; affine_expr 0 0 1 0 0])).
-Lemma checked_H0 : tree_check mixed_target_shapes tree_H0 shape_H0=true.
-Proof. vm_compute; reflexivity. Qed.
-Definition prefix_H0 (x0 x1 x2:nat) (r:list Sym) :=
-  (cfg D ([]) S0 ([S1;S1;S1;S1;S0]++copies (28+6*x0) [S1;S1;S1;S0]++[S0]++copies (26+2*x2) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (13+x2) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (11+2*x0) [S1;S1;S1;S0]++[S0]++copies (6+x0) [S1;S1;S1;S0]++[S1;S1;S1;S1;S1;S1;S0]++copies (4+x1) [S1;S1;S1;S0]++[S0;S0;S1;S0;S1;S0]++r)).
-Definition prefix_QShield (x0 x1 x2:nat) (r:list Sym) :=
-  (cfg D ([]) S0 ([S1;S1;S1;S1;S0]++copies (38+6*x0) [S1;S1;S1;S0]++[S0]++copies (30+6*x1) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (15+3*x1) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (14+2*x0) [S1;S1;S1;S0]++[S0]++copies (8+x0) [S1;S1;S1;S0]++[S1;S1;S1;S1;S1;S1;S0]++copies (9+2*x1) [S1;S1;S1;S0]++[S0;S0;S1;S0;S1]++copies (6+x1) [S1;S1;S1;S0]++[S1;S1;S1;S1;S1;S1;S0]++copies (4+x2) [S1;S1;S1;S0]++[S0;S0;S1;S0;S1;S0]++r)).
-Definition prefix_QH1 (x0 x1:nat) (r:list Sym) :=
-  (cfg D ([]) S0 ([S1;S1;S1;S1;S0]++copies (38+6*x0) [S1;S1;S1;S0]++[S0]++copies (40+6*x1) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (20+3*x1) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (14+2*x0) [S1;S1;S1;S0]++[S0]++copies (8+x0) [S1;S1;S1;S0]++[S1;S1;S1;S1;S1;S1;S0]++copies (13+2*x1) [S1;S1;S1;S0]++[S0;S0;S1;S0;S1]++copies (7+x1) [S1;S1;S1;S0]++[S1;S1;S1;S1;S1;S1;S0]++copies (9+2*x1) [S1;S1;S1;S0]++[S0;S0;S1;S0;S1;S0]++r)).
+Definition prefix_S22 a b c r := counter_pair (24+a) (22+4*b)
+  (pure_page (10+2*b) (pure_page (6+c) r)).
+Definition prefix_H0 a b c r := counter_pair (28+6*a) (26+2*c)
+  (pure_page (13+c) (saved_body (10+2*a) (5+a) ([Three]^^(4+b)) ([0] *> r))).
+Definition prefix_H1 a b r := counter_pair (38+6*a) (26+2*b)
+  (pure_page (13+b) (saved_body (14+2*a) (6+a) ([Three]^^(9+2*a)) ([0] *> r))).
+Definition prefix_QShield a b c r := counter_pair (38+6*a) (30+6*b)
+  (pure_page (15+3*b) (saved_body (13+2*a) (7+a) ([Three]^^(9+2*b))
+    (callback_payload (3+b) (2+c) ([0] *> r)))).
+Definition prefix_QH1 a b r := counter_pair (38+6*a) (40+6*b)
+  (pure_page (20+3*b) (saved_body (13+2*a) (7+a) ([Three]^^(13+2*b))
+    (callback_payload (4+b) (7+2*b) ([0] *> r)))).
+Definition folded_front x y z r := tilted
+  (row (3*x+6*y+25) [y+4;2*y+6;4*x+14;8*x+29]) (x+5)
+  ([0;1]^^(x+4) *> core_bits ([Three]^^(x+4)++Six::[Three]^^(2*x+6)) *>
+    [0;0;1;0;1;0] *> pure_page (z+2) r).
+Definition two_gap_front x y r := tilted
+  (row (9*x+37) [x+2*y+14;2*x+4*y+27]) (3*x+14)
+  ([0;1]^^(3*x+12) *> [0] *> pure_page (3*x+11) (pure_page (3*x+13) r)).
 Definition mixed_prefix_target c :=
-  (exists a0 a1 a2 r, c=prefix_S22 a0 a1 a2 r) \/
-  (exists a0 a1 r, c=prefix_H1 a0 a1 r) \/
-  (exists a0 a1 a2 r, c=prefix_H0 a0 a1 a2 r) \/
-  (exists a0 a1 a2 r, c=prefix_QShield a0 a1 a2 r) \/
-  (exists a0 a1 r, c=prefix_QH1 a0 a1 r).
-Definition mixed_return c := exists d, Progress c d /\ mixed_prefix_target d.
-Lemma mixed_shapes_sound c : target_family mixed_target_shapes c -> mixed_prefix_target c.
-Proof.
-  intros [s [Hin [env [r ->]]]].
-  cbn [mixed_target_shapes In] in Hin.
-  destruct Hin as [<-|[<-|[<-|[<-|[<-|[]]]]]].
-  - unfold mixed_prefix_target; left.
-    exists (nth 0 env 0),(nth 1 env 0),(nth 2 env 0),r; reflexivity.
-  - unfold mixed_prefix_target; right; left.
-    exists (nth 0 env 0),(nth 1 env 0),r; reflexivity.
-  - unfold mixed_prefix_target; right; right; left.
-    exists (nth 0 env 0),(nth 1 env 0),(nth 2 env 0),r; reflexivity.
-  - unfold mixed_prefix_target; right; right; right; left.
-    exists (nth 0 env 0),(nth 1 env 0),(nth 2 env 0),r; reflexivity.
-  - unfold mixed_prefix_target; right; right; right; right; idtac.
-    exists (nth 0 env 0),(nth 1 env 0),r; reflexivity.
-Qed.
-Lemma S22_returns (x0 x1 x2:nat) (r:list Sym) :
-  mixed_return (prefix_S22 x0 x1 x2 r).
-Proof.
-  destruct (tree_check_sound mixed_target_shapes tree_S22 shape_S22 checked_S22
-    x0 x1 x2 0 r) as [d [Hrun Htarget]].
-  exists d; split; [exact Hrun|apply mixed_shapes_sound; exact Htarget].
-Qed.
-Lemma H1_returns (x0 x1:nat) (r:list Sym) :
-  mixed_return (prefix_H1 x0 x1 r).
-Proof.
-  destruct (tree_check_sound mixed_target_shapes tree_H1 shape_H1 checked_H1
-    x0 x1 0 0 r) as [d [Hrun Htarget]].
-  exists d; split; [exact Hrun|apply mixed_shapes_sound; exact Htarget].
-Qed.
-Lemma H0_returns (x0 x1 x2:nat) (r:list Sym) :
-  mixed_return (prefix_H0 x0 x1 x2 r).
-Proof.
-  destruct (tree_check_sound mixed_target_shapes tree_H0 shape_H0 checked_H0
-    x0 x1 x2 0 r) as [d [Hrun Htarget]].
-  exists d; split; [exact Hrun|apply mixed_shapes_sound; exact Htarget].
-Qed.
-Definition shape_K5 : cs := (Empty,word [
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 24 1 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0];
-    Rep (Aff 28 0 4 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 13 0 2 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 20 0 0 6 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 10 0 0 3 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 8 0 0 0 2) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 5 0 0 0 1) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Tail]).
-Definition shape_O5_1 : cs := (Empty,word [
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 24 1 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0];
-    Rep (Aff 30 0 2 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 12 0 1 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 11 0 1 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 13 0 1 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 20 0 0 6 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 10 0 0 3 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Tail]).
-Definition shape_O5_2 : cs := (Empty,word [
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 24 1 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0];
-    Rep (Aff 30 0 2 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 12 0 1 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 11 0 1 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 13 0 1 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 20 0 0 6 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 11 0 0 3 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Tail]).
-Definition five_target_shapes := [shape_S22;shape_H1].
-Definition tree_K5 : tree :=
-  (Parity 0
-  (Parity 0
-    (Leaf 4 0 [affine_expr 32 0 6 6 0; affine_expr 1 1 0 0 0; affine_expr 9 0 2 0 0])
-    (Parity 1
-      (Parity 2
-        (Leaf 9 0 [affine_expr 33 6 6 0 0; affine_expr 9 0 3 3 0; affine_expr 8 2 0 0 0])
-        (Parity 0
-          (Parity 1
-            (Leaf 16 1 [affine_expr 8 3 3 0 0; affine_expr 38 2 18 9 0])
-            (Parity 2
-              (Parity 0
-                (Parity 1
-                  (Leaf 25 0 [affine_expr 229 42 138 54 0; affine_expr 26 12 12 0 0; affine_expr 54 4 36 18 0])
-                  (Leaf 22 0 [affine_expr 263 30 126 54 0; affine_expr 32 12 12 0 0; affine_expr 72 4 36 18 0]))
-                (Parity 1
-                  (Leaf 22 0 [affine_expr 215 30 126 54 0; affine_expr 32 12 12 0 0; affine_expr 56 4 36 18 0])
-                  (Leaf 25 0 [affine_expr 319 42 138 54 0; affine_expr 38 12 12 0 0; affine_expr 74 4 36 18 0])))
-              (Leaf 17 0 [affine_expr 100 24 24 0 0; affine_expr 29 1 9 9 0; affine_expr 29 6 6 0 0])))
-          (Parity 1
-            (Parity 2
-              (Parity 0
-                (Parity 1
-                  (Leaf 25 0 [affine_expr 205 42 138 54 0; affine_expr 26 12 12 0 0; affine_expr 46 4 36 18 0])
-                  (Leaf 22 0 [affine_expr 239 30 126 54 0; affine_expr 32 12 12 0 0; affine_expr 64 4 36 18 0]))
-                (Parity 1
-                  (Leaf 22 0 [affine_expr 191 30 126 54 0; affine_expr 32 12 12 0 0; affine_expr 48 4 36 18 0])
-                  (Leaf 25 0 [affine_expr 295 42 138 54 0; affine_expr 38 12 12 0 0; affine_expr 66 4 36 18 0])))
-              (Leaf 17 0 [affine_expr 100 24 24 0 0; affine_expr 25 1 9 9 0; affine_expr 29 6 6 0 0]))
-            (Leaf 16 1 [affine_expr 11 3 3 0 0; affine_expr 48 2 18 9 0]))))
-      (Parity 2
-        (Parity 0
-          (Parity 1
-            (Parity 2
-              (Leaf 20 0 [affine_expr 108 24 24 24 0; affine_expr 20 1 9 9 0; affine_expr 31 6 6 6 0])
-              (Leaf 19 1 [affine_expr 12 3 3 3 0; affine_expr 47 2 18 18 0]))
-            (Parity 2
-              (Leaf 19 1 [affine_expr 12 3 3 3 0; affine_expr 47 2 18 18 0])
-              (Leaf 20 0 [affine_expr 132 24 24 24 0; affine_expr 29 1 9 9 0; affine_expr 37 6 6 6 0])))
-          (Parity 1
-            (Parity 2
-              (Leaf 19 1 [affine_expr 12 3 3 3 0; affine_expr 39 2 18 18 0])
-              (Leaf 20 0 [affine_expr 132 24 24 24 0; affine_expr 25 1 9 9 0; affine_expr 37 6 6 6 0]))
-            (Parity 2
-              (Leaf 20 0 [affine_expr 132 24 24 24 0; affine_expr 25 1 9 9 0; affine_expr 37 6 6 6 0])
-              (Leaf 19 1 [affine_expr 15 3 3 3 0; affine_expr 57 2 18 18 0]))))
-        (Leaf 13 0 [affine_expr 53 6 6 6 2; affine_expr 12 0 3 3 0; affine_expr 8 2 0 0 0]))))
-  (Parity 0
-    (Leaf 7 1 [affine_expr 0 1 0 0 0; affine_expr 14 0 3 3 0])
-    (Parity 1
-      (Parity 2
-        (Leaf 8 0 [affine_expr 28 8 0 0 0; affine_expr 8 0 3 3 0; affine_expr 11 2 0 0 0])
-        (Parity 0
-          (Leaf 13 0 [affine_expr 83 6 18 18 0; affine_expr 8 4 0 0 0; affine_expr 24 0 6 6 0])
-          (Leaf 16 0 [affine_expr 99 10 18 18 0; affine_expr 10 4 0 0 0; affine_expr 24 0 6 6 0])))
-      (Parity 2
-        (Parity 0
-          (Leaf 13 0 [affine_expr 83 6 18 18 0; affine_expr 8 4 0 0 0; affine_expr 24 0 6 6 0])
-          (Leaf 16 0 [affine_expr 99 10 18 18 0; affine_expr 10 4 0 0 0; affine_expr 24 0 6 6 0]))
-        (Leaf 8 0 [affine_expr 28 8 0 0 0; affine_expr 11 0 3 3 0; affine_expr 11 2 0 0 0]))))).
-Lemma checked_K5 : tree_check five_target_shapes tree_K5 shape_K5=true.
-Proof. vm_compute; reflexivity. Qed.
-Definition tree_O5_1 : tree :=
-  (Parity 0
-  (Parity 1
-    (Leaf 3 1 [affine_expr 0 0 1 0 0; affine_expr 0 1 0 0 0])
-    (Parity 0
-      (Leaf 4 0 [affine_expr 28 0 8 0 0; affine_expr 1 1 0 0 0; affine_expr 11 0 2 0 0])
-      (Parity 1
-        (Leaf 9 0 [affine_expr 35 6 6 0 0; affine_expr 8 0 4 0 0; affine_expr 8 2 0 0 0])
-        (Leaf 12 0 [affine_expr 51 6 10 0 0; affine_expr 10 0 4 0 0; affine_expr 8 2 0 0 0]))))
-  (Parity 1
-    (Parity 0
-      (Leaf 6 1 [affine_expr 0 1 0 0 0; affine_expr 5 0 3 0 0])
-      (Parity 1
-        (Parity 0
-          (Leaf 12 0 [affine_expr 47 6 18 0 0; affine_expr 8 4 0 0 0; affine_expr 12 0 6 0 0])
-          (Leaf 16 0 [affine_expr 78 10 22 0 0; affine_expr 10 4 0 0 0; affine_expr 12 0 6 0 0]))
-        (Leaf 7 0 [affine_expr 28 8 0 0 0; affine_expr 5 0 3 0 0; affine_expr 11 2 0 0 0])))
-    (Parity 0
-      (Leaf 7 1 [affine_expr 0 1 0 0 0; affine_expr 12 0 4 0 0])
-      (Leaf 8 0 [affine_expr 28 8 0 0 0; affine_expr 7 0 2 0 0; affine_expr 11 2 0 0 0])))).
-Lemma checked_O5_1 : tree_check five_target_shapes tree_O5_1 shape_O5_1=true.
-Proof. vm_compute; reflexivity. Qed.
-Definition tree_O5_2 : tree :=
-  (Parity 0
-  (Parity 1
-    (Leaf 3 1 [affine_expr 0 0 1 0 0; affine_expr 0 1 0 0 0])
-    (Parity 0
-      (Leaf 4 0 [affine_expr 28 0 8 0 0; affine_expr 1 1 0 0 0; affine_expr 11 0 2 0 0])
-      (Parity 1
-        (Leaf 9 0 [affine_expr 35 6 6 0 0; affine_expr 8 0 4 0 0; affine_expr 8 2 0 0 0])
-        (Leaf 12 0 [affine_expr 51 6 10 0 0; affine_expr 10 0 4 0 0; affine_expr 8 2 0 0 0]))))
-  (Parity 1
-    (Parity 0
-      (Leaf 6 1 [affine_expr 0 1 0 0 0; affine_expr 5 0 3 0 0])
-      (Parity 1
-        (Parity 0
-          (Leaf 12 0 [affine_expr 47 6 18 0 0; affine_expr 8 4 0 0 0; affine_expr 12 0 6 0 0])
-          (Leaf 16 0 [affine_expr 78 10 22 0 0; affine_expr 10 4 0 0 0; affine_expr 12 0 6 0 0]))
-        (Leaf 7 0 [affine_expr 28 8 0 0 0; affine_expr 5 0 3 0 0; affine_expr 11 2 0 0 0])))
-    (Parity 0
-      (Leaf 7 1 [affine_expr 0 1 0 0 0; affine_expr 12 0 4 0 0])
-      (Leaf 8 0 [affine_expr 28 8 0 0 0; affine_expr 7 0 2 0 0; affine_expr 11 2 0 0 0])))).
-Lemma checked_O5_2 : tree_check five_target_shapes tree_O5_2 shape_O5_2=true.
-Proof. vm_compute; reflexivity. Qed.
+  (exists a b d r, c=prefix_S22 a b d r) \/
+  (exists a b r, c=prefix_H1 a b r) \/
+  (exists a b d r, c=prefix_H0 a b d r) \/
+  (exists a b d r, c=prefix_QShield a b d r) \/
+  (exists a b r, c=prefix_QH1 a b r).
+Inductive mixed_return c : Prop :=
+| return_step d : c -->+ d -> mixed_prefix_target d -> mixed_return c.
 
-Definition prefix_K5 (x0 x1 x2 x3:nat) (r:list Sym) :=
-  (cfg D ([]) S0 ([S1;S1;S1;S1;S0]++copies (24+x0) [S1;S1;S1;S0]++[S0]++copies (28+4*x1) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (13+2*x1) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (20+6*x2) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (10+3*x2) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (8+2*x3) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (5+x3) [S1;S1;S1;S0]++[S0;S0]++r)).
-Definition prefix_O5_1 (x0 x1 x2:nat) (r:list Sym) :=
-  (cfg D ([]) S0 ([S1;S1;S1;S1;S0]++copies (24+x0) [S1;S1;S1;S0]++[S0]++copies (30+2*x1) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (12+x1) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (11+x1) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (13+x1) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (20+6*x2) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (10+3*x2) [S1;S1;S1;S0]++[S0;S0]++r)).
-Definition prefix_O5_2 (x0 x1 x2:nat) (r:list Sym) :=
-  (cfg D ([]) S0 ([S1;S1;S1;S1;S0]++copies (24+x0) [S1;S1;S1;S0]++[S0]++copies (30+2*x1) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (12+x1) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (11+x1) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (13+x1) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (20+6*x2) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (11+3*x2) [S1;S1;S1;S0]++[S0;S0]++r)).
-Definition five_prefix_target c :=
-  (exists a0 a1 a2 r, c=prefix_S22 a0 a1 a2 r) \/
-  (exists a0 a1 r, c=prefix_H1 a0 a1 r).
-Definition five_return c := exists d, Progress c d /\ five_prefix_target d.
-Lemma five_prefix_return_change a b : a=b -> five_return b -> five_return a.
-Proof. intros -> H; exact H. Qed.
-Lemma five_shapes_sound c : target_family five_target_shapes c -> five_prefix_target c.
+Lemma mixed_return_trans c d : c -->+ d -> mixed_return d -> mixed_return c.
 Proof.
-  intros [s [Hin [env [r ->]]]].
-  cbn [five_target_shapes In] in Hin.
-  destruct Hin as [<-|[<-|[]]].
-  - unfold five_prefix_target; left.
-    exists (nth 0 env 0),(nth 1 env 0),(nth 2 env 0),r; reflexivity.
-  - unfold five_prefix_target; right; idtac.
-    exists (nth 0 env 0),(nth 1 env 0),r; reflexivity.
+  intros H [e He HP]. eapply return_step; [eapply progress_trans; eassumption|exact HP].
 Qed.
-Lemma K5_returns (x0 x1 x2 x3:nat) (r:list Sym) :
-  five_return (prefix_K5 x0 x1 x2 x3 r).
+
+Lemma mixed_return_here c d : c -->+ d -> mixed_prefix_target d -> mixed_return c.
+Proof. apply return_step. Qed.
+
+Lemma mixed_return_change c d : c=d -> mixed_return d -> mixed_return c.
+Proof. intros -> H. exact H. Qed.
+
+Set Primitive Projections.
+Record affine := Aff { offset:N; coef_a:N; coef_b:N; coef_c:N; coef_d:N }.
+Unset Primitive Projections.
+Arguments Aff (_ _ _ _ _)%_N.
+Definition affine_value a (v:list nat) := N.to_nat (offset a)+N.to_nat (coef_a a)*nth 0 v 0%nat+
+  N.to_nat (coef_b a)*nth 1 v 0%nat+N.to_nat (coef_c a)*nth 2 v 0%nat+N.to_nat (coef_d a)*nth 3 v 0%nat.
+Definition affine_const n := Aff n 0 0 0 0.
+Definition affine_add a b := (Aff (offset a+offset b) (coef_a a+coef_a b)
+  (coef_b a+coef_b b) (coef_c a+coef_c b) (coef_d a+coef_d b))%N.
+Definition affine_scale k a := (Aff (k*offset a) (k*coef_a a)
+  (k*coef_b a) (k*coef_c a) (k*coef_d a))%N.
+Definition affine_sub a b := (Aff (offset a-offset b) (coef_a a-coef_a b)
+  (coef_b a-coef_b b) (coef_c a-coef_c b) (coef_d a-coef_d b))%N.
+Definition affine_le a b := ((offset a<=?offset b)%N&&(coef_a a<=?coef_a b)%N&&
+  (coef_b a<=?coef_b b)%N&&(coef_c a<=?coef_c b)%N&&(coef_d a<=?coef_d b)%N)%bool.
+Definition constant_affine a := match a with Aff n 0 0 0 0 => Some n | _ => None end.
+Definition zero_affine a := match a with Aff 0 0 0 0 0 => true | _ => false end.
+
+Lemma affine_const_value n v : affine_value (affine_const n) v=N.to_nat n.
+Proof. unfold affine_value,affine_const; cbn; lia. Qed.
+Lemma affine_add_value a b v : affine_value (affine_add a b) v=affine_value a v+affine_value b v.
+Proof. destruct a,b; unfold affine_value,affine_add; cbn; rewrite !N2Nat.inj_add; nia. Qed.
+Lemma affine_scale_value k a v : affine_value (affine_scale k a) v=N.to_nat k*affine_value a v.
+Proof. destruct a; unfold affine_value,affine_scale; cbn; rewrite !N2Nat.inj_mul; nia. Qed.
+Lemma affine_sub_add a b : affine_le b a=true -> affine_add (affine_sub a b) b=a.
 Proof.
-  destruct (tree_check_sound five_target_shapes tree_K5 shape_K5 checked_K5
-    x0 x1 x2 x3 r) as [d [Hrun Htarget]].
-  exists d; split; [exact Hrun|apply five_shapes_sound; exact Htarget].
+  destruct a,b; unfold affine_le,affine_add,affine_sub; cbn.
+  rewrite !Bool.andb_true_iff,!N.leb_le. intros [[[[H0 H1] H2] H3] H4]. f_equal; lia.
 Qed.
-Lemma O5_1_returns (x0 x1 x2:nat) (r:list Sym) :
-  five_return (prefix_O5_1 x0 x1 x2 r).
+Lemma affine_sub_value a b v : affine_le b a=true ->
+  affine_value (affine_sub a b) v=affine_value a v-affine_value b v.
 Proof.
-  destruct (tree_check_sound five_target_shapes tree_O5_1 shape_O5_1 checked_O5_1
-    x0 x1 x2 0 r) as [d [Hrun Htarget]].
-  exists d; split; [exact Hrun|apply five_shapes_sound; exact Htarget].
+  intro H. pose proof (f_equal (fun a => affine_value a v) (affine_sub_add a b H)) as E.
+  change (affine_value (affine_add (affine_sub a b) b) v=affine_value a v) in E.
+  rewrite affine_add_value in E. lia.
 Qed.
-Lemma O5_2_returns (x0 x1 x2:nat) (r:list Sym) :
-  five_return (prefix_O5_2 x0 x1 x2 r).
+Lemma constant_affine_value a n v : constant_affine a=Some n -> affine_value a v=N.to_nat n.
 Proof.
-  destruct (tree_check_sound five_target_shapes tree_O5_2 shape_O5_2 checked_O5_2
-    x0 x1 x2 0 r) as [d [Hrun Htarget]].
-  exists d; split; [exact Hrun|apply five_shapes_sound; exact Htarget].
+  destruct a as [c [|a] [|b] [|d] [|e]]; cbn[constant_affine]; try discriminate.
+  intros H; inversion H; subst. unfold affine_value; cbn[offset coef_a coef_b coef_c coef_d]. lia.
 Qed.
-Definition shape_KEmpty : cs := (Empty,word [
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 82 20 6 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0];
-    Rep (Aff 64 4 12 4 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 31 2 6 2 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 20 6 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 10 3 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 9 0 2 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 5 0 1 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0];
-    Rep (Aff 4 1 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) six;
-    Rep (Aff 6 2 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0;S1;S0;S1];
-    Tail]).
-Definition shape_BOddNonempty : cs := (Empty,word [
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 80 18 6 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0];
-    Rep (Aff 28 0 0 4 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 13 0 0 2 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 20 6 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 11 3 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 9 0 2 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0];
-    Rep (Aff 6 0 1 0 0) u;
-    Rep (Aff 1 0 0 0 0) six;
-    Rep (Aff 3 2 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0;S1;S0;S1;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 9 2 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Tail]).
-Definition shape_BOddEmpty : cs := (Empty,word [
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 80 18 6 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0];
-    Rep (Aff 72 4 12 4 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 35 2 6 2 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 20 6 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 11 3 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 9 0 2 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0];
-    Rep (Aff 6 0 1 0 0) u;
-    Rep (Aff 1 0 0 0 0) six;
-    Rep (Aff 4 2 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0;S0;S1;S0;S1;S0];
-    Rep (Aff 1 0 0 0 0) [S1;S1;S1;S1;S0];
-    Rep (Aff 8 2 0 0 0) u;
-    Rep (Aff 1 0 0 0 0) [S0];
-    Tail]).
-Definition short_target_shapes := [shape_S22;shape_H1].
-Definition tree_KEmpty : tree :=
-  (Parity 1
-  (Parity 0
-    (Parity 2
-      (Parity 2
-        (Leaf 20 0 [affine_expr 324 144 72 24 0; affine_expr 45 14 15 9 0; affine_expr 85 36 18 6 0])
-        (Leaf 19 1 [affine_expr 39 18 9 3 0; affine_expr 97 28 30 18 0]))
-      (Leaf 9 0 [affine_expr 147 66 36 6 0; affine_expr 24 6 9 3 0; affine_expr 36 20 6 0 0]))
-    (Parity 2
-      (Parity 0
-        (Parity 2
-          (Leaf 16 1 [affine_expr 44 33 9 3 0; affine_expr 102 56 30 18 0])
-          (Parity 0
-            (Parity 1
-              (Parity 2
-                (Leaf 25 0 [affine_expr 601 666 270 138 0; affine_expr 98 132 36 12 0; affine_expr 118 112 60 36 0])
-                (Leaf 22 0 [affine_expr 563 534 234 126 0; affine_expr 104 132 36 12 0; affine_expr 136 112 60 36 0]))
-              (Parity 2
-                (Leaf 22 0 [affine_expr 617 534 234 126 0; affine_expr 116 132 36 12 0; affine_expr 148 112 60 36 0])
-                (Leaf 25 0 [affine_expr 805 666 270 138 0; affine_expr 122 132 36 12 0; affine_expr 166 112 60 36 0])))
-            (Parity 1
-              (Parity 2
-                (Leaf 22 0 [affine_expr 767 534 234 126 0; affine_expr 164 132 36 12 0; affine_expr 174 112 60 36 0])
-                (Leaf 25 0 [affine_expr 1003 666 270 138 0; affine_expr 170 132 36 12 0; affine_expr 192 112 60 36 0]))
-              (Parity 2
-                (Leaf 25 0 [affine_expr 1069 666 270 138 0; affine_expr 182 132 36 12 0; affine_expr 204 112 60 36 0])
-                (Leaf 22 0 [affine_expr 947 534 234 126 0; affine_expr 188 132 36 12 0; affine_expr 222 112 60 36 0])))))
-        (Parity 2
-          (Leaf 17 0 [affine_expr 508 264 72 24 0; affine_expr 66 28 15 9 0; affine_expr 131 66 18 6 0])
-          (Leaf 16 1 [affine_expr 62 33 9 3 0; affine_expr 139 56 30 18 0])))
-      (Leaf 14 0 [affine_expr 202 72 42 6 0; affine_expr 27 6 9 3 0; affine_expr 46 20 6 0 0])))
-  (Leaf 4 0 [affine_expr 104 12 36 6 0; affine_expr 17 5 3 0 0; affine_expr 33 2 12 2 0])).
-Lemma checked_KEmpty : tree_check short_target_shapes tree_KEmpty shape_KEmpty=true.
-Proof. vm_compute; reflexivity. Qed.
-Definition tree_BOddNonempty : tree :=
-  (Parity 0
-  (Parity 1
-    (Leaf 4 0 [affine_expr 32 12 0 6 0; affine_expr 15 9 3 0 0; affine_expr 9 0 0 2 0])
-    (Parity 2
-      (Leaf 9 0 [affine_expr 123 54 18 6 0; affine_expr 9 3 0 3 0; affine_expr 38 18 6 0 0])
-      (Parity 1
-        (Parity 2
-          (Leaf 17 0 [affine_expr 110 36 12 36 0; affine_expr 37 15 11 3 0; affine_expr 27 6 0 12 0])
-          (Parity 0
-            (Leaf 22 0 [affine_expr 291 198 66 36 0; affine_expr 33 18 3 9 0; affine_expr 82 60 22 6 0])
-            (Leaf 26 0 [affine_expr 429 216 72 40 0; affine_expr 42 18 3 9 0; affine_expr 112 60 22 6 0])))
-        (Parity 2
-          (Parity 0
-            (Zero 2
-              (Leaf 26 0 [affine_expr 337 216 72 0 0; affine_expr 30 18 3 0 0; affine_expr 90 60 22 0 0])
-              (Leaf 26 0 [affine_expr 377 216 72 40 0; affine_expr 39 18 3 9 0; affine_expr 96 60 22 6 0]))
-            (Leaf 22 0 [affine_expr 405 198 66 36 0; affine_expr 39 18 3 9 0; affine_expr 120 60 22 6 0]))
-          (Leaf 17 0 [affine_expr 134 36 12 36 0; affine_expr 44 15 11 3 0; affine_expr 33 6 0 12 0])))))
-  (Parity 1
-    (Parity 2
-      (Parity 0
-        (Parity 1
-          (Parity 2
-            (Leaf 16 1 [affine_expr 35 27 9 3 0; affine_expr 56 36 6 18 0])
-            (Parity 0
-              (Parity 1
-                (Parity 2
-                  (Leaf 22 0 [affine_expr 335 378 90 126 0; affine_expr 80 108 36 12 0; affine_expr 72 72 12 36 0])
-                  (Leaf 25 0 [affine_expr 487 486 126 138 0; affine_expr 86 108 36 12 0; affine_expr 90 72 12 36 0]))
-                (Parity 2
-                  (Leaf 25 0 [affine_expr 481 486 126 138 0; affine_expr 98 108 36 12 0; affine_expr 78 72 12 36 0])
-                  (Leaf 22 0 [affine_expr 443 378 90 126 0; affine_expr 104 108 36 12 0; affine_expr 96 72 12 36 0])))
-              (Parity 1
-                (Parity 2
-                  (Leaf 25 0 [affine_expr 661 486 126 138 0; affine_expr 134 108 36 12 0; affine_expr 108 72 12 36 0])
-                  (Leaf 22 0 [affine_expr 587 378 90 126 0; affine_expr 140 108 36 12 0; affine_expr 126 72 12 36 0]))
-                (Parity 2
-                  (Leaf 22 0 [affine_expr 569 378 90 126 0; affine_expr 152 108 36 12 0; affine_expr 114 72 12 36 0])
-                  (Leaf 25 0 [affine_expr 793 486 126 138 0; affine_expr 158 108 36 12 0; affine_expr 132 72 12 36 0])))))
-          (Parity 2
-            (Parity 0
-              (Parity 1
-                (Parity 2
-                  (Leaf 25 0 [affine_expr 415 486 126 138 0; affine_expr 86 108 36 12 0; affine_expr 66 72 12 36 0])
-                  (Leaf 22 0 [affine_expr 389 378 90 126 0; affine_expr 92 108 36 12 0; affine_expr 84 72 12 36 0]))
-                (Parity 2
-                  (Leaf 22 0 [affine_expr 371 378 90 126 0; affine_expr 104 108 36 12 0; affine_expr 72 72 12 36 0])
-                  (Leaf 25 0 [affine_expr 547 486 126 138 0; affine_expr 110 108 36 12 0; affine_expr 90 72 12 36 0])))
-              (Parity 1
-                (Parity 2
-                  (Leaf 22 0 [affine_expr 515 378 90 126 0; affine_expr 140 108 36 12 0; affine_expr 102 72 12 36 0])
-                  (Leaf 25 0 [affine_expr 727 486 126 138 0; affine_expr 146 108 36 12 0; affine_expr 120 72 12 36 0]))
-                (Parity 2
-                  (Leaf 25 0 [affine_expr 721 486 126 138 0; affine_expr 158 108 36 12 0; affine_expr 108 72 12 36 0])
-                  (Leaf 22 0 [affine_expr 623 378 90 126 0; affine_expr 164 108 36 12 0; affine_expr 126 72 12 36 0]))))
-            (Leaf 16 1 [affine_expr 41 27 9 3 0; affine_expr 68 36 6 18 0])))
-        (Parity 1
-          (Parity 2
-            (Leaf 17 0 [affine_expr 412 216 72 24 0; affine_expr 38 18 3 9 0; affine_expr 107 54 18 6 0])
-            (Leaf 16 1 [affine_expr 50 27 9 3 0; affine_expr 83 36 6 18 0]))
-          (Parity 2
-            (Leaf 16 1 [affine_expr 53 27 9 3 0; affine_expr 77 36 6 18 0])
-            (Leaf 17 0 [affine_expr 460 216 72 24 0; affine_expr 44 18 3 9 0; affine_expr 119 54 18 6 0]))))
-      (Leaf 12 0 [affine_expr 155 60 18 6 0; affine_expr 12 3 0 3 0; affine_expr 44 18 6 0 0]))
-    (Leaf 4 0 [affine_expr 38 12 0 6 0; affine_expr 21 9 3 0 0; affine_expr 9 0 0 2 0]))).
-Lemma checked_BOddNonempty : tree_check short_target_shapes tree_BOddNonempty shape_BOddNonempty=true.
-Proof. vm_compute; reflexivity. Qed.
-Definition tree_BOddEmpty : tree :=
-  (Parity 0
-  (Parity 1
-    (Leaf 4 0 [affine_expr 98 24 36 6 0; affine_expr 15 9 3 0 0; affine_expr 31 4 12 2 0])
-    (Parity 2
-      (Leaf 9 0 [affine_expr 165 60 36 6 0; affine_expr 30 6 9 3 0; affine_expr 38 18 6 0 0])
-      (Parity 0
-        (Parity 2
-          (Parity 1
-            (Leaf 22 0 [affine_expr 399 234 174 36 0; affine_expr 60 27 30 9 0; affine_expr 100 66 40 6 0])
-            (Leaf 26 0 [affine_expr 537 256 192 40 0; affine_expr 75 27 30 9 0; affine_expr 120 66 40 6 0]))
-          (Leaf 17 0 [affine_expr 254 108 60 36 0; affine_expr 49 33 10 3 0; affine_expr 75 24 18 12 0]))
-        (Parity 2
-          (Leaf 17 0 [affine_expr 290 108 60 36 0; affine_expr 64 33 10 3 0; affine_expr 81 24 18 12 0])
-          (Parity 1
-            (Leaf 26 0 [affine_expr 589 256 192 40 0; affine_expr 78 27 30 9 0; affine_expr 136 66 40 6 0])
-            (Leaf 22 0 [affine_expr 621 234 174 36 0; affine_expr 93 27 30 9 0; affine_expr 156 66 40 6 0]))))))
-  (Parity 1
-    (Parity 2
-      (Parity 2
-        (Leaf 16 1 [affine_expr 44 15 9 3 0; affine_expr 110 27 30 18 0])
-        (Parity 0
-          (Parity 1
-            (Parity 2
-              (Leaf 25 0 [affine_expr 625 312 270 138 0; affine_expr 98 60 36 12 0; affine_expr 126 54 60 36 0])
-              (Leaf 22 0 [affine_expr 587 252 234 126 0; affine_expr 104 60 36 12 0; affine_expr 144 54 60 36 0]))
-            (Parity 2
-              (Leaf 22 0 [affine_expr 641 252 234 126 0; affine_expr 116 60 36 12 0; affine_expr 156 54 60 36 0])
-              (Leaf 25 0 [affine_expr 829 312 270 138 0; affine_expr 122 60 36 12 0; affine_expr 174 54 60 36 0])))
-          (Leaf 17 0 [affine_expr 508 240 72 24 0; affine_expr 74 27 15 9 0; affine_expr 131 60 18 6 0])))
-      (Leaf 12 0 [affine_expr 191 66 36 6 0; affine_expr 30 6 9 3 0; affine_expr 44 18 6 0 0]))
-    (Leaf 4 0 [affine_expr 128 24 36 6 0; affine_expr 21 9 3 0 0; affine_expr 39 4 12 2 0]))).
-Lemma checked_BOddEmpty : tree_check short_target_shapes tree_BOddEmpty shape_BOddEmpty=true.
-Proof. vm_compute; reflexivity. Qed.
-Definition prefix_KEmpty (x0 x1 x2:nat) (r:list Sym) :=
-  (cfg D ([]) S0 ([S1;S1;S1;S1;S0]++copies (82+20*x0+6*x1) [S1;S1;S1;S0]++[S0]++copies (64+4*x0+12*x1+4*x2) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (31+2*x0+6*x1+2*x2) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (20+6*x0) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (10+3*x0) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (9+2*x1) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (5+x1) [S1;S1;S1;S0]++[S0]++copies (4+x0) [S1;S1;S1;S0]++[S1;S1;S1;S1;S1;S1;S0]++copies (6+2*x0) [S1;S1;S1;S0]++[S0;S0;S1;S0;S1]++r)).
-Definition prefix_BOddNonempty (x0 x1 x2:nat) (r:list Sym) :=
-  (cfg D ([]) S0 ([S1;S1;S1;S1;S0]++copies (80+18*x0+6*x1) [S1;S1;S1;S0]++[S0]++copies (28+4*x2) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (13+2*x2) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (20+6*x0) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (11+3*x0) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (9+2*x1) [S1;S1;S1;S0]++[S0]++copies (6+x1) [S1;S1;S1;S0]++[S1;S1;S1;S1;S1;S1;S0]++copies (3+2*x0) [S1;S1;S1;S0]++[S0;S0;S1;S0;S1;S0]++[S1;S1;S1;S1;S0]++copies (9+2*x0) [S1;S1;S1;S0]++[S0;S0]++r)).
-Definition prefix_BOddEmpty (x0 x1 x2:nat) (r:list Sym) :=
-  (cfg D ([]) S0 ([S1;S1;S1;S1;S0]++copies (80+18*x0+6*x1) [S1;S1;S1;S0]++[S0]++copies (72+4*x0+12*x1+4*x2) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (35+2*x0+6*x1+2*x2) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (20+6*x0) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (11+3*x0) [S1;S1;S1;S0]++[S0;S0]++[S1;S1;S1;S1;S0]++copies (9+2*x1) [S1;S1;S1;S0]++[S0]++copies (6+x1) [S1;S1;S1;S0]++[S1;S1;S1;S1;S1;S1;S0]++copies (4+2*x0) [S1;S1;S1;S0]++[S0;S0;S1;S0;S1;S0]++[S1;S1;S1;S1;S0]++copies (8+2*x0) [S1;S1;S1;S0]++[S0]++r)).
-Definition short_prefix_target c :=
-  (exists a0 a1 a2 r, c=prefix_S22 a0 a1 a2 r) \/
-  (exists a0 a1 r, c=prefix_H1 a0 a1 r).
-Definition short_return c := exists d, Progress c d /\ short_prefix_target d.
-Lemma short_prefix_return_change a b : a=b -> short_return b -> short_return a.
-Proof. intros -> H; exact H. Qed.
-Lemma short_shapes_sound c : target_family short_target_shapes c -> short_prefix_target c.
+Lemma zero_affine_value a v : zero_affine a=true -> affine_value a v=0%nat.
+Proof. destruct a as [[|c] [|a] [|b] [|d] [|e]]; cbn; try discriminate; reflexivity. Qed.
+
+Inductive nat_expr := NConst (n:N) | NVar (i:nat) | NAdd (a b:nat_expr)
+  | NMul (a b:nat_expr) | NSub (a b:nat_expr).
+Arguments NConst _%_N.
+Fixpoint nat_value e (v:list nat) := match e with
+  | NConst n => N.to_nat n | NVar i => nth i v 0%nat
+  | NAdd a b => nat_value a v+nat_value b v
+  | NMul a b => nat_value a v*nat_value b v
+  | NSub a b => nat_value a v-nat_value b v end.
+Fixpoint affine_normal e : option affine := match e with
+  | NConst n => Some (affine_const n)
+  | NVar 0 => Some (Aff 0 1 0 0 0) | NVar 1 => Some (Aff 0 0 1 0 0)
+  | NVar 2 => Some (Aff 0 0 0 1 0) | NVar 3 => Some (Aff 0 0 0 0 1) | NVar _ => None
+  | NAdd a b => match affine_normal a,affine_normal b with
+      Some x,Some y => Some (affine_add x y) | _,_ => None end
+  | NMul a b => match affine_normal a,affine_normal b with
+    | Some x,Some y => match constant_affine x with
+      | Some k => Some (affine_scale k y)
+      | None => match constant_affine y with Some k => Some (affine_scale k x) | None => None end end
+    | _,_ => None end
+  | NSub a b => match affine_normal a,affine_normal b with
+      Some x,Some y => if affine_le y x then Some (affine_sub x y) else None | _,_ => None end end.
+
+Lemma affine_normal_sound e a : affine_normal e=Some a -> forall v, nat_value e v=affine_value a v.
 Proof.
-  intros [s [Hin [env [r ->]]]].
-  cbn [short_target_shapes In] in Hin.
-  destruct Hin as [<-|[<-|[]]].
-  - unfold short_prefix_target; left.
-    exists (nth 0 env 0),(nth 1 env 0),(nth 2 env 0),r; reflexivity.
-  - unfold short_prefix_target; right; idtac.
-    exists (nth 0 env 0),(nth 1 env 0),r; reflexivity.
+  gen a. induction e; intros a H v; cbn[affine_normal] in H.
+  - inversion H; subst; cbn[nat_value]; symmetry; apply affine_const_value.
+  - destruct i as [|[|[|[|i]]]]; try discriminate; inversion H; subst;
+      unfold affine_value; cbn[nat_value offset coef_a coef_b coef_c coef_d]; lia.
+  - destruct (affine_normal e1) as [x|] eqn:Hx; try discriminate.
+    destruct (affine_normal e2) as [y|] eqn:Hy; try discriminate.
+    inversion H; subst; cbn[nat_value]. rewrite (IHe1 x eq_refl v),(IHe2 y eq_refl v),affine_add_value. reflexivity.
+  - destruct (affine_normal e1) as [x|] eqn:Hx; try discriminate.
+    destruct (affine_normal e2) as [y|] eqn:Hy; try discriminate.
+    cbn[nat_value]. rewrite (IHe1 x eq_refl v),(IHe2 y eq_refl v).
+    destruct (constant_affine x) as [k|] eqn:Hk.
+    + inversion H; subst. rewrite affine_scale_value,(constant_affine_value x k v Hk). reflexivity.
+    + destruct (constant_affine y) as [k|] eqn:Hl; try discriminate.
+      inversion H; subst. rewrite affine_scale_value,(constant_affine_value y k v Hl). lia.
+  - destruct (affine_normal e1) as [x|] eqn:Hx; try discriminate.
+    destruct (affine_normal e2) as [y|] eqn:Hy; try discriminate.
+    destruct (affine_le y x) eqn:Hle; try discriminate.
+    inversion H; subst; cbn[nat_value]. rewrite (IHe1 x eq_refl v),(IHe2 y eq_refl v).
+    symmetry. apply affine_sub_value,Hle.
 Qed.
-Lemma KEmpty_returns (x0 x1 x2:nat) (r:list Sym) :
-  short_return (prefix_KEmpty x0 x1 x2 r).
+
+Lemma nat_equal_sound a b x : affine_normal a=Some x -> affine_normal b=Some x ->
+  forall v, nat_value a v=nat_value b v.
+Proof. intros Ha Hb v. rewrite (affine_normal_sound a x Ha v),(affine_normal_sound b x Hb v). reflexivity. Qed.
+
+Inductive core_expr := CEmpty | CAppend (a b:core_expr) | CBlock (b:block) | CPower (n:nat_expr).
+Fixpoint core_value e v := match e with
+  | CEmpty => [] | CAppend a b => core_value a v++core_value b v
+  | CBlock b => [b] | CPower n => [Three]^^(nat_value n v) end.
+Inductive word_expr := WEmpty | WAppend (a b:word_expr)
+  | WPower (n:nat_expr) (w:list Sym) | WCore (c:core_expr).
+Fixpoint word_value e v := match e with
+  | WEmpty => [] | WAppend a b => word_value a v++word_value b v
+  | WPower n w => w^^(nat_value n v) | WCore c => core_bits (core_value c v) end.
+Inductive side_expr := STail | SPrefix (w:word_expr) (r:side_expr).
+Fixpoint side_value e v r := match e with
+  | STail => r | SPrefix w t => word_value w v *> side_value t v r end.
+Fixpoint side_word e := match e with
+  | STail => WEmpty | SPrefix w t => WAppend w (side_word t) end.
+
+Lemma side_word_value e v r : side_value e v r=word_value (side_word e) v *> r.
 Proof.
-  destruct (tree_check_sound short_target_shapes tree_KEmpty shape_KEmpty checked_KEmpty
-    x0 x1 x2 0 r) as [d [Hrun Htarget]].
-  exists d; split; [exact Hrun|apply short_shapes_sound; exact Htarget].
+  induction e; cbn[side_value side_word word_value]; [reflexivity|].
+  rewrite IHe. symmetry. apply Str_app_assoc.
 Qed.
-Lemma BOddNonempty_returns (x0 x1 x2:nat) (r:list Sym) :
-  short_return (prefix_BOddNonempty x0 x1 x2 r).
+
+Inductive word_segment := Rep (a:affine) (w:list Sym).
+Definition segment_value x v := match x with Rep a w => w^^(affine_value a v) end.
+Fixpoint segments_value xs v := match xs with [] => [] | x::xs => segment_value x v++segments_value xs v end.
+
+Lemma segments_app xs ys v : segments_value (xs++ys) v=segments_value xs v++segments_value ys v.
+Proof. induction xs; cbn; [reflexivity|rewrite IHxs,app_assoc; reflexivity]. Qed.
+
+Fixpoint compile_core e : option (list word_segment) := match e with
+  | CEmpty => Some [] | CBlock b => Some [Rep (affine_const 1) (block_bits b)]
+  | CPower n => match affine_normal n with Some a => Some [Rep a U] | None => None end
+  | CAppend a b => match compile_core a,compile_core b with Some x,Some y => Some (x++y) | _,_ => None end end.
+Fixpoint compile_word e : option (list word_segment) := match e with
+  | WEmpty => Some [] | WCore c => compile_core c
+  | WPower n w => match affine_normal n with Some a => Some [Rep a w] | None => None end
+  | WAppend a b => match compile_word a,compile_word b with Some x,Some y => Some (x++y) | _,_ => None end end.
+
+Lemma compile_core_sound e xs : compile_core e=Some xs ->
+  forall v, core_bits (core_value e v)=segments_value xs v.
 Proof.
-  destruct (tree_check_sound short_target_shapes tree_BOddNonempty shape_BOddNonempty checked_BOddNonempty
-    x0 x1 x2 0 r) as [d [Hrun Htarget]].
-  exists d; split; [exact Hrun|apply short_shapes_sound; exact Htarget].
+  gen xs. induction e; intros xs H v; cbn[compile_core] in H.
+  - inversion H; reflexivity.
+  - destruct (compile_core e1) as [p|] eqn:Hp; try discriminate.
+    destruct (compile_core e2) as [q|] eqn:Hq; try discriminate.
+    inversion H; subst; cbn[core_value].
+    rewrite core_bits_app,(IHe1 p eq_refl v),(IHe2 q eq_refl v),segments_app. reflexivity.
+  - inversion H; subst. cbn[core_value segments_value segment_value].
+    rewrite affine_const_value. destruct b; reflexivity.
+  - destruct (affine_normal n) as [a|] eqn:Ha; try discriminate.
+    inversion H; subst; cbn[core_value segments_value segment_value].
+    rewrite core_bits_threes,(affine_normal_sound n a Ha v),app_nil_r. reflexivity.
 Qed.
-Lemma BOddEmpty_returns (x0 x1 x2:nat) (r:list Sym) :
-  short_return (prefix_BOddEmpty x0 x1 x2 r).
+
+Lemma compile_word_sound e xs : compile_word e=Some xs -> forall v, word_value e v=segments_value xs v.
 Proof.
-  destruct (tree_check_sound short_target_shapes tree_BOddEmpty shape_BOddEmpty checked_BOddEmpty
-    x0 x1 x2 0 r) as [d [Hrun Htarget]].
-  exists d; split; [exact Hrun|apply short_shapes_sound; exact Htarget].
+  gen xs. induction e; intros xs H v; cbn[compile_word] in H.
+  - inversion H; reflexivity.
+  - destruct (compile_word e1) as [p|] eqn:Hp; try discriminate.
+    destruct (compile_word e2) as [q|] eqn:Hq; try discriminate.
+    inversion H; subst; cbn[word_value]. rewrite (IHe1 p eq_refl v),(IHe2 q eq_refl v),segments_app. reflexivity.
+  - destruct (affine_normal n) as [a|] eqn:Ha; try discriminate.
+    inversion H; subst; cbn[word_value segments_value segment_value].
+    rewrite (affine_normal_sound n a Ha v),app_nil_r. reflexivity.
+  - cbn[word_value]. apply compile_core_sound,H.
 Qed.
-Inductive ReturnFamily : config -> Prop :=
+
+Fixpoint word_eqb (x y:list Sym) := match x,y with
+  | [],[] => true | a::x,b::y => (sym_eqb a b&&word_eqb x y)%bool | _,_ => false end.
+Lemma word_eqb_sound x y : word_eqb x y=true -> x=y.
+Proof.
+  gen y. induction x; intros [|b y]; cbn[word_eqb]; try discriminate; auto.
+  rewrite Bool.andb_true_iff. intros [H T].
+  apply (proj2 (Bool.reflect_iff _ _ (sym_eqb_spec _ _))) in H; subst.
+  f_equal. apply IHx,T.
+Qed.
+
+Lemma empty_power n : (@nil Sym)^^n=[].
+Proof. induction n; cbn[lpow app]; auto. Qed.
+
+Definition empty_segment x := match x with Rep a w =>
+  (zero_affine a||match w with [] => true | _ => false end)%bool end.
+Lemma empty_segment_sound x : empty_segment x=true -> forall v, segment_value x v=[].
+Proof.
+  destruct x as [a w]. cbn[empty_segment]. rewrite Bool.orb_true_iff. intros [H|H] v.
+  - cbn[segment_value]. rewrite (zero_affine_value a v H). reflexivity.
+  - destruct w; try discriminate. apply empty_power.
+Qed.
+Fixpoint trim_segments xs := match xs with
+  | [] => [] | x::xs => if empty_segment x then trim_segments xs else x::xs end.
+Lemma trim_segments_value xs v : segments_value (trim_segments xs) v=segments_value xs v.
+Proof.
+  induction xs as [|x xs IH]; cbn[trim_segments]; [reflexivity|].
+  destruct (empty_segment x) eqn:H; [|reflexivity].
+  cbn[segments_value]. rewrite (empty_segment_sound x H v). exact IH.
+Qed.
+
+Definition cancel_segments xs ys := match xs,ys with
+  | Rep a w::xs,Rep b z::ys => if word_eqb w z then
+      if affine_le a b then Some (xs,Rep (affine_sub b a) z::ys) else
+      if affine_le b a then Some (Rep (affine_sub a b) w::xs,ys) else None
+    else None
+  | _,_ => None end.
+Lemma segment_split a b (w:list Sym) v : affine_le a b=true ->
+  w^^(affine_value b v)=w^^(affine_value a v)++w^^(affine_value (affine_sub b a) v).
+Proof.
+  intro H. pose proof (f_equal (fun b => affine_value b v) (affine_sub_add b a H)) as E.
+  change (affine_value (affine_add (affine_sub b a) a) v=affine_value b v) in E.
+  rewrite affine_add_value in E.
+  replace (affine_value b v) with (affine_value a v+affine_value (affine_sub b a) v) by lia.
+  apply lpow_add.
+Qed.
+Lemma cancel_segments_sound xs ys p q : cancel_segments xs ys=Some (p,q) ->
+  forall v, segments_value p v=segments_value q v -> segments_value xs v=segments_value ys v.
+Proof.
+  destruct xs as [|[a w] xs]; [destruct ys; discriminate|].
+  destruct ys as [|[b z] ys]; [discriminate|]. cbn[cancel_segments].
+  destruct (word_eqb w z) eqn:Hw; try discriminate. apply word_eqb_sound in Hw; subst z.
+  destruct (affine_le a b) eqn:Hab.
+  - intro H; inversion H; subst; intros v E; cbn[segments_value segment_value] in *.
+    rewrite (segment_split a b w v Hab),<-app_assoc,E. reflexivity.
+  - destruct (affine_le b a) eqn:Hba; try discriminate.
+    intro H; inversion H; subst; intros v E; cbn[segments_value segment_value] in *.
+    rewrite (segment_split b a w v Hba),<-app_assoc,E. reflexivity.
+Qed.
+
+Lemma rotate_power n (b:Sym) w r : (b::w)^^n++b::r=b::((w++[b])^^n++r).
+Proof.
+  induction n; cbn[lpow]; [reflexivity|].
+  cbn[app]. repeat rewrite <-app_assoc. rewrite IHn.
+  cbn[app]. repeat rewrite <-app_assoc. reflexivity.
+Qed.
+Definition affine_dec a := Aff (N.pred (offset a)) (coef_a a) (coef_b a) (coef_c a) (coef_d a).
+Lemma affine_dec_value a v : (0<offset a)%N -> affine_value a v=S (affine_value (affine_dec a) v).
+Proof.
+  destruct a as [c a b d e]. unfold affine_value,affine_dec; cbn[offset coef_a coef_b coef_c coef_d].
+  rewrite N2Nat.inj_pred. intro H.
+  assert (0<N.to_nat c) by (destruct c; cbn in *; [lia|apply Pos2Nat.is_pos]). lia.
+Qed.
+
+Fixpoint expose_segment xs : option (Sym*list word_segment) := match xs with
+  | [] => None | Rep a []::xs => expose_segment xs
+  | Rep a (b::w)::xs => if zero_affine a then expose_segment xs else
+    match offset a with
+    | Npos _ => Some (b,Rep (affine_const 1) w::Rep (affine_dec a) (b::w)::xs)
+    | N0 => match expose_segment xs with
+      | Some (c,ys) => if sym_eqb b c then Some (b,Rep a (w++[b])::ys) else None
+      | None => None end end end.
+Lemma expose_segment_sound xs b ys : expose_segment xs=Some (b,ys) ->
+  forall v, segments_value xs v=b::segments_value ys v.
+Proof.
+  gen b ys. induction xs as [|[a w] xs IH]; intros b ys H v; try discriminate.
+  destruct w as [|c w].
+  - cbn[expose_segment] in H. cbn[segments_value segment_value].
+    rewrite empty_power. apply IH,H.
+  - cbn[expose_segment] in H. destruct (zero_affine a) eqn:Hz.
+    + cbn[segments_value segment_value]. rewrite (zero_affine_value a v Hz). apply IH,H.
+    + destruct (offset a) eqn:Hn.
+      * destruct (expose_segment xs) as [[d zs]|] eqn:He; try discriminate.
+        destruct (sym_eqb c d) eqn:Hcd; try discriminate.
+        apply (proj2 (Bool.reflect_iff _ _ (sym_eqb_spec _ _))) in Hcd; subst d.
+        inversion H; subst; cbn[segments_value segment_value].
+        rewrite (IH b zs eq_refl v). apply rotate_power.
+      * inversion H; subst; cbn[segments_value segment_value].
+        rewrite (affine_dec_value a v ltac:(lia)),affine_const_value.
+        change (N.to_nat 1%N) with 1%nat.
+        cbn[lpow]. repeat rewrite <-app_assoc. reflexivity.
+Qed.
+
+Definition no_segments (xs ys:list word_segment) := match xs,ys with [],[] => true | _,_ => false end.
+Fixpoint segments_equal fuel xs ys := match fuel with
+  | O => false | S fuel => let x:=trim_segments xs in let y:=trim_segments ys in
+    if no_segments x y then true else match cancel_segments x y with
+    | Some (p,q) => segments_equal fuel p q
+    | None => match expose_segment x,expose_segment y with
+      | Some (b,p),Some (c,q) => (sym_eqb b c&&segments_equal fuel p q)%bool
+      | _,_ => false end end end.
+Lemma segments_equal_sound fuel xs ys : segments_equal fuel xs ys=true ->
+  forall v, segments_value xs v=segments_value ys v.
+Proof.
+  gen xs ys. induction fuel as [|fuel IH]; intros xs ys H v; try discriminate.
+  cbn[segments_equal] in H. rewrite <-(trim_segments_value xs v),<-(trim_segments_value ys v).
+  remember (trim_segments xs) as x in *; remember (trim_segments ys) as y in *.
+  destruct (no_segments x y) eqn:He.
+  - destruct x,y; try discriminate; reflexivity.
+  - destruct (cancel_segments x y) as [[p q]|] eqn:Hc.
+    + eapply cancel_segments_sound; [exact Hc|]. apply IH,H.
+    + destruct (expose_segment x) as [[b p]|] eqn:Hx; try discriminate.
+      destruct (expose_segment y) as [[c q]|] eqn:Hy; try discriminate.
+      apply Bool.andb_true_iff in H. destruct H as [Hbc Hrest].
+      apply (proj2 (Bool.reflect_iff _ _ (sym_eqb_spec _ _))) in Hbc; subst c.
+      rewrite (expose_segment_sound x b p Hx v),(expose_segment_sound y b q Hy v).
+      f_equal. apply IH,Hrest.
+Qed.
+
+Definition word_equal fuel a b := match compile_word a,compile_word b with
+  | Some x,Some y => segments_equal fuel x y | _,_ => false end.
+Lemma word_equal_sound fuel a b : word_equal fuel a b=true -> forall v, word_value a v=word_value b v.
+Proof.
+  unfold word_equal. destruct (compile_word a) as [x|] eqn:Hx; try discriminate.
+  destruct (compile_word b) as [y|] eqn:Hy; try discriminate. intros H v.
+  rewrite (compile_word_sound a x Hx v),(compile_word_sound b y Hy v). apply (segments_equal_sound fuel x y H v).
+Qed.
+Lemma side_equal_sound fuel a b : word_equal fuel (side_word a) (side_word b)=true ->
+  forall v r, side_value a v r=side_value b v r.
+Proof. intros H v r. rewrite !side_word_value,(word_equal_sound fuel _ _ H v). reflexivity. Qed.
+
+Lemma core_bits_injective u v : core_bits u=core_bits v -> u=v.
+Proof.
+  gen v. induction u as [|b u IH]; intros [|c v] H.
+  - reflexivity.
+  - destruct c; discriminate.
+  - destruct b; discriminate.
+  - destruct b,c; cbn[core_bits flat_map block_bits U V app] in H; try discriminate;
+      f_equal; apply IH; congruence.
+Qed.
+
+Ltac fast_refl := lazymatch goal with |- ?a = ?b =>
+  first [constr_eq a b; reflexivity | is_evar a; reflexivity | is_evar b; reflexivity] end.
+Ltac split_application tac := lazymatch goal with
+  | |- ?f ?a ?b = ?f ?c ?d => apply (f_equal2 f); [tac|tac]
+  | |- ?f ?a = ?f ?b => apply (f_equal f); tac end.
+
+Ltac positive_literal p := lazymatch p with
+  | xH => constr:(true) | xO ?p => positive_literal p | xI ?p => positive_literal p
+  | _ => constr:(false) end.
+Ltac nat_literal n := lazymatch n with
+  | O => constr:(Some 0%N)
+  | S O => constr:(Some 1%N)
+  | S (S O) => constr:(Some 2%N)
+  | S _ => let p := eval vm_compute in (N.of_nat n) in
+      lazymatch p with Npos ?q => let literal := positive_literal q in
+        lazymatch literal with true => constr:(Some p) | false => constr:(@None N) end
+      | _ => constr:(@None N) end
+  | _ => constr:(@None N) end.
+Ltac literal_bits w := lazymatch w with
+  | [] => constr:(true)
+  | S0::?w => literal_bits w
+  | S1::?w => literal_bits w
+  | _ => constr:(false)
+  end.
+Ltac atom_index n env := lazymatch env with
+  | [] => constr:(@None nat)
+  | ?x::?xs => lazymatch constr:((n,x)) with
+    | (?v,?v) => constr:(Some 0%nat)
+    | _ => let i := atom_index n xs in lazymatch i with
+      | Some ?i => constr:(Some (S i)) | None => constr:(@None nat) end end end.
+Ltac quote_nat n env kont := lazymatch n with
+  | N.to_nat ?n => kont uconstr:(NConst n) env
+  | _ => let literal := nat_literal n in lazymatch literal with
+  | Some ?n => kont uconstr:(NConst n) env
+  | None => lazymatch n with
+    | S ?n => quote_nat n env ltac:(fun a env => kont uconstr:(NAdd (NConst 1) a) env)
+    | ?a+?b => quote_nat a env ltac:(fun a env => quote_nat b env ltac:(fun b env => kont uconstr:(NAdd a b) env))
+    | ?a*?b => quote_nat a env ltac:(fun a env => quote_nat b env ltac:(fun b env => kont uconstr:(NMul a b) env))
+    | ?a-?b => quote_nat a env ltac:(fun a env => quote_nat b env ltac:(fun b env => kont uconstr:(NSub a b) env))
+    | _ => let i := atom_index n env in lazymatch i with
+      | Some ?i => kont uconstr:(NVar i) env
+      | None => let i := eval cbv[List.length] in (List.length env) in
+          let env := eval cbv[app] in (env++[n]) in kont uconstr:(NVar i) env end end end end.
+Ltac quote_row a xs env kont := lazymatch xs with
+  | [] => quote_nat a env ltac:(fun a env => kont uconstr:(CPower a) env)
+  | ?b::?xs => quote_row a xs env ltac:(fun w env =>
+      quote_nat b env ltac:(fun b env => kont uconstr:(CAppend w (CAppend (CBlock Six) (CPower b))) env)) end.
+Ltac quote_core w env kont := lazymatch w with
+  | [] => kont uconstr:(CEmpty) env
+  | [Three]^^?n => quote_nat n env ltac:(fun n env => kont uconstr:(CPower n) env)
+  | row ?a ?xs => let xs := eval cbv[app] in xs in quote_row a xs env kont
+  | ?b::?w => quote_core w env ltac:(fun w env => kont uconstr:(CAppend (CBlock b) w) env)
+  | ?u++?v => quote_core u env ltac:(fun u env => quote_core v env ltac:(fun v env => kont uconstr:(CAppend u v) env))
+  | odd_outer _ => let w := eval unfold odd_outer in w in quote_core w env kont
+  | page_core _ _ _ => let w := eval unfold page_core in w in quote_core w env kont end.
+Ltac quote_word w env kont :=
+  let w := eval cbv beta iota zeta delta[U V] in w in
+  let literal := literal_bits w in lazymatch literal with
+  | true => kont uconstr:(WPower (NConst 1) w) env
+  | false => lazymatch w with
+    | ?w^^?n => quote_nat n env ltac:(fun n env => kont uconstr:(WPower n w) env)
+    | core_bits ?w => quote_core w env ltac:(fun w env => kont uconstr:(WCore w) env)
+    | page _ => let w := eval unfold page in w in quote_word w env kont
+    | ?u++?v => quote_word u env ltac:(fun u env => quote_word v env ltac:(fun v env => kont uconstr:(WAppend u v) env))
+    | ?s::?w => quote_word w env ltac:(fun w env => kont uconstr:(WAppend (WPower (NConst 1) [s]) w) env) end end.
+Ltac quote_side_to stop fuel r env kont :=
+  tryif constr_eq r stop then kont uconstr:(STail) env r else lazymatch fuel with
+  | O => kont uconstr:(STail) env r
+  | S ?fuel =>
+  let r := lazymatch r with
+  | ?w *> ?t => r | ?s >> ?t => r
+  | _ => eval cbv beta iota zeta delta[pure_page page_header saved_body core_suffix
+    frame_body qright qframe callback_payload callback_middle saved_pages] in r end in
+  lazymatch r with
+  | ?w *> ?r => quote_word w env ltac:(fun w env => quote_side_to stop fuel r env ltac:(fun r env tail => kont uconstr:(SPrefix w r) env tail))
+  | ?s >> ?r => quote_side_to stop fuel r env ltac:(fun r env tail => kont uconstr:(SPrefix (WPower (NConst 1) [s]) r) env tail)
+  | _ => kont uconstr:(STail) env r end end.
+Ltac quote_side r env kont := quote_side_to constr:(0inf) constr:(16) r env kont.
+Ltac common_tail a b := lazymatch a with
+  | context[b] => b
+  | _ => lazymatch b with ?w *> ?r => common_tail a r | ?s >> ?r => common_tail a r | _ => b end end.
+Ltac reflected_tape_eq := lazymatch goal with |- ?a = ?b =>
+  let a := eval cbv beta iota zeta delta[pure_page page_header saved_body core_suffix
+    frame_body qright qframe callback_payload callback_middle saved_pages] in a in
+  let b := eval cbv beta iota zeta delta[pure_page page_header saved_body core_suffix
+    frame_body qright qframe callback_payload callback_middle saved_pages] in b in
+  let stop := common_tail a b in
+  quote_side_to stop constr:(64) a constr:(@nil nat) ltac:(fun a env tail =>
+  quote_side_to stop constr:(64) b env ltac:(fun b env tail' =>
+    unify tail tail';
+    change (side_value a env tail=side_value b env tail);
+    apply (side_equal_sound (N.to_nat 64%N) a b); reflexivity)) end.
+Ltac reflected_core_eq := lazymatch goal with |- ?a = ?b =>
+  quote_core a constr:(@nil nat) ltac:(fun a env =>
+  quote_core b env ltac:(fun b env =>
+    apply core_bits_injective;
+    change (word_value (WCore a) env=word_value (WCore b) env);
+    apply (word_equal_sound (N.to_nat 64%N) (WCore a) (WCore b)); reflexivity)) end.
+Ltac reflected_nat_eq := lazymatch goal with |- ?a = ?b =>
+  quote_nat a constr:(@nil nat) ltac:(fun a env =>
+  quote_nat b env ltac:(fun b env =>
+    let x := eval vm_compute in (affine_normal a) in lazymatch x with Some ?x =>
+      change (nat_value a env=nat_value b env);
+      apply (nat_equal_sound a b x); reflexivity end)) end.
+Ltac scalar_eq := first [reflected_nat_eq|lia].
+Ltac term_eq := first [fast_refl|
+  lazymatch goal with |- @eq nat _ _ => lia end|split_application term_eq].
+Ltac core_eq := first [fast_refl|reflected_core_eq|term_eq].
+Ltac native_tape_eq := first [fast_refl|reflected_tape_eq|
+  unfold saved_pages,callback_payload,callback_middle,core_suffix,saved_body,pure_page,page_header,page;
+  rewrite ?core_bits_app,?core_bits_threes,?Str_app_assoc;
+  cbn[Str_app app block_bits U V]; term_eq].
+Ltac native_eq :=
+  unfold prefix_S22,prefix_H0,prefix_H1,prefix_QShield,prefix_QH1,folded_front,two_gap_front;
+  lazymatch goal with
+  | |- counter_pair _ _ _ = counter_pair _ _ _ =>
+      apply (f_equal3 counter_pair); [first [fast_refl|scalar_eq]|first [fast_refl|scalar_eq]|native_tape_eq]
+  | |- tilted _ _ _ = tilted _ _ _ =>
+      apply (f_equal3 tilted); [core_eq|first [fast_refl|scalar_eq]|native_tape_eq]
+  | |- carried _ _ = carried _ _ =>
+      apply (f_equal2 carried); [core_eq|native_tape_eq]
+  | |- W _ _ = W _ _ => apply (f_equal2 W); [core_eq|native_tape_eq]
+  end.
+
+Definition affine_quotient a n d :=
+  if ((n<=?offset a)%N&&((offset a-n) mod d=?0)%N&&(coef_a a mod d=?0)%N&&
+      (coef_b a mod d=?0)%N&&(coef_c a mod d=?0)%N&&(coef_d a mod d=?0)%N)%bool
+  then (Some (Aff ((offset a-n)/d) (coef_a a/d) (coef_b a/d) (coef_c a/d) (coef_d a/d)))%N
+  else None.
+Fixpoint join_runs xs ys := match xs with
+  | [] => ys | [a] => match ys with [] => xs | b::ys => affine_add a b::ys end
+  | a::xs => a::join_runs xs ys end.
+Fixpoint core_runs e := match e with
+  | CEmpty => Some [affine_const 0]
+  | CBlock Three => Some [affine_const 1]
+  | CBlock Six => Some [affine_const 0;affine_const 0]
+  | CPower n => match affine_normal n with Some a => Some [a] | None => None end
+  | CAppend a b => match core_runs a,core_runs b with
+      Some x,Some y => Some (join_runs x y) | _,_ => None end end.
+Definition reduce_runs xs a b := match xs with
+  | [] => [] | x::xs => match rev (affine_sub x (affine_const a)::xs) with
+    | [] => [] | y::ys => rev (affine_sub y (affine_const b)::ys) end end.
+Fixpoint cycle_eq p rest w := match w with
+  | [] => true | b::w => match rest with
+    | [] => match p with [] => false | c::rest => if sym_eqb b c then cycle_eq p rest w else false end
+    | c::rest => if sym_eqb b c then cycle_eq p rest w else false end end.
+Definition stop_run p (rest:list Sym) (n:affine) xs :=
+  let head := firstn (List.length p-List.length rest) p in
+  (n,match head with [] => xs | _ => Rep (affine_const 1) head::xs end).
+Fixpoint scan_run (fuel:nat) p rest n xs := match fuel with
+  | O => None
+  | S fuel => match xs with
+    | [] => Some (stop_run p rest n xs)
+    | Rep a w::ys => if empty_segment (Rep a w) then scan_run fuel p rest n ys else
+      if cycle_eq p rest (w^^(List.length p)) then
+        scan_run fuel p rest (affine_add n (affine_scale (N.of_nat (List.length w/List.length p)) a)) ys
+      else match offset a,w,rest with
+      | Npos _,b::w',c::rest' => if sym_eqb b c then
+        let ys := Rep (affine_const 1) w'::Rep (affine_dec a) w::ys in
+        match rest' with
+        | [] => scan_run fuel p p (affine_add n (affine_const 1)) ys
+        | _ => scan_run fuel p rest' n ys end
+        else Some (stop_run p rest n xs)
+      | _,_,_ => None end end end.
+Definition scan_prefix p xs := scan_run 256 p p (affine_const 0) xs.
+Fixpoint skip_symbols (fuel n:nat) xs {struct fuel} := match n with
+  | O => Some xs
+  | S n' => match fuel,xs with
+    | S fuel,Rep a w::ys => if empty_segment (Rep a w) then skip_symbols fuel n ys else
+      match offset a,w with
+      | Npos _,b::w' => skip_symbols fuel n' (Rep (affine_const 1) w'::Rep (affine_dec a) w::ys)
+      | _,_ => None end
+    | _,_ => None end end.
+Fixpoint scan_more (fuel:nat) xs cs := match fuel with
+  | O => None
+  | S fuel => match scan_prefix V xs with
+    | Some (n,_) => if zero_affine n then Some (rev cs,xs) else
+      match offset n with
+      | Npos _ => match skip_symbols 256 7 xs with
+        | Some xs => match scan_prefix U xs with
+          | Some (a,xs) => scan_more fuel xs (a::cs) | None => None end
+        | None => None end
+      | _ => None end
+    | None => None end end.
+Definition scan_core xs := match scan_prefix U xs with
+  | Some (a,xs) => scan_more 64 xs [a] | None => None end.
+Inductive macro_choice := Choice (tag:nat) (args u v:list affine) (tail:list word_segment).
+Definition choose_pair a b := match affine_quotient a 2 2 with
+  | Some k => Some (Choice 0 [k;affine_sub b (affine_const 4)] [] [] [])
+  | None => match affine_quotient a 3 2 with
+    | Some k => Some (Choice 1 [k;affine_sub b (affine_const 8)] [] [] [])
+    | None => None end end.
+Definition choose_tilted joined wc xs := match scan_prefix [S0;S1] xs with
+  | Some (p,xs) => match (match affine_quotient p 2 2 with
+    | Some m => Some (true,m)
+    | None => match affine_quotient p 1 2 with Some m => Some (false,m) | None => None end end) with
+    | Some (even,m) => match scan_core xs with
+    | Some (cs,xs) => match skip_symbols 256 1 xs with
+      | Some xs => if even then match cs with
+          | [a] => Some (Choice 2 [m;affine_sub a (affine_const 2)] (reduce_runs wc 0 1) [] xs)
+          | _ => if (joined&&(0<?offset (last wc (affine_const 0)))%N&&
+                          (1<?offset (last cs (affine_const 0)))%N)%bool
+            then Some (Choice 5 [m] (reduce_runs wc 0 1) (reduce_runs cs 1 2) xs)
+            else Some (Choice 3 [m] [] (reduce_runs cs 1 1) xs) end
+        else match wc with
+          | a::b::g => Some (Choice 4 [a;b;m] (rev g) (reduce_runs cs 1 2) xs)
+          | _ => None end
+      | None => None end
+    | None => None end
+    | None => None end
+  | None => None end.
+Definition choose_carried wc xs := match scan_core xs with
+  | Some (cs,xs) => match skip_symbols 256 1 xs with
+    | Some xs => Some (Choice 6 [] (reduce_runs wc 0 1) (reduce_runs cs 0 1) xs)
+    | None => None end
+  | None => None end.
+Definition choose_W wc := match rev wc with
+  | b::n::cs => Some (Choice 7 [n;b] (rev cs) [] []) | _ => None end.
+Fixpoint scan_headers ns xs := match ns with
+  | [] => Some ([],xs)
+  | n::ns => match skip_symbols 256 n xs with
+    | Some xs => match scan_prefix U xs with
+      | Some (a,xs) => match scan_headers ns xs with
+        | Some (cs,xs) => Some (a::cs,xs) | None => None end
+      | None => None end
+    | None => None end end.
+Definition choose_target (which:nat) a b xs := match which with
+  | O => match affine_quotient b 22 4,scan_headers [5;7] xs with
+    | Some b,Some ([p;c],xs) => match skip_symbols 256 2 xs with
+      | Some xs => Some ([affine_sub a (affine_const 24);b;affine_sub c (affine_const 6)],xs)
+      | None => None end
+    | _,_ => None end
+  | _ => match affine_quotient a 38 6,affine_quotient b 26 2,scan_headers [5;7;1%nat;7] xs with
+    | Some a,Some b,Some (_,xs) => match skip_symbols 256 6 xs with
+      | Some xs => Some ([a;b],xs) | None => None end
+    | _,_,_ => None end end.
+
+Ltac compact_nat n := lazymatch n with
+  | N0 => constr:(0%nat) | Npos xH => constr:(1%nat) | Npos (xO xH) => constr:(2)
+  | _ => constr:(N.to_nat n) end.
+Ltac affine_terms cs env := lazymatch constr:((cs,env)) with
+  | (?c::?cs,?x::?env) => let rest := affine_terms cs env in
+    lazymatch c with
+    | N0 => rest | _ => let t := lazymatch c with Npos xH => x |
+        _ => let c := compact_nat c in constr:(x*c) end in
+        lazymatch rest with O => t | _ => constr:(t+rest) end end
+  | _ => constr:(0%nat) end.
+Ltac unquote_affine a env := lazymatch a with Aff ?n ?a ?b ?c ?d =>
+  let t := affine_terms constr:([a;b;c;d]) env in
+  let n := compact_nat n in
+  lazymatch constr:((n,t)) with (O,_) => t | (_,O) => n | _ => constr:(t+n) end end.
+Ltac unquote_runs xs env := lazymatch xs with
+  | [] => uconstr:(@nil block)
+  | [?a] => let a := unquote_affine a env in uconstr:([Three]^^a)
+  | ?a::?xs => let a := unquote_affine a env in let xs := unquote_runs xs env in uconstr:([Three]^^a++Six::xs) end.
+Ltac unquote_args xs env := lazymatch xs with
+  | [] => constr:(@nil nat) | ?a::?xs => let a := unquote_affine a env in
+      let xs := unquote_args xs env in constr:(a::xs) end.
+Ltac unquote_segments xs env r := lazymatch xs with
+  | [] => r | Rep _ []::?xs => unquote_segments xs env r
+  | Rep ?a ?w::?xs => let n := unquote_affine a env in
+    let r := unquote_segments xs env r in lazymatch n with
+    | O => r | S O => uconstr:(w *> r) | _ => uconstr:(w^^n *> r) end end.
+Ltac quote_right fuel wc r env kont :=
+  quote_side_to constr:(0inf) fuel r env ltac:(fun r env tail =>
+    let parts := eval vm_compute in (compile_word (side_word r)) in
+    lazymatch parts with Some ?xs => kont wc xs env tail end).
+Ltac quote_parts w r kont := quote_core w constr:(@nil nat) ltac:(fun w env =>
+  let parts := eval vm_compute in (core_runs w) in
+  lazymatch parts with Some ?wc =>
+    first [quote_right constr:(5) wc r env kont|quote_right constr:(8) wc r env kont|
+      quote_right constr:(16) wc r env kont] end).
+Ltac use_choice choice env r w n step := lazymatch choice with
+  | Some (Choice ?tag ?args ?u ?v ?xs) =>
+    let args := unquote_args args env in
+    let tail := unquote_segments xs env r in
+    let v := unquote_runs v env in
+    lazymatch constr:((tag,args)) with
+    | (O,[?k;?b]) => step constr:(1%nat) constr:(paired_even k b r)
+    | (S O,[?k;?b]) => step constr:(1%nat) constr:(paired_odd k b r)
+    | (2%nat,[?m;?c]) => let u := unquote_runs u env in step constr:(1%nat) constr:(T_page u n m c tail)
+    | (3%nat,[?m]) => step constr:(1%nat) constr:(T_even w n m v tail)
+    | (4%nat,[?a;?b;?m]) => let g := unquote_args u env in step constr:(1%nat) constr:(T_odd_frontier a b g n m v tail)
+    | (5%nat,[?m]) => let u := unquote_runs u env in step constr:(2) constr:(T_even_return u n m v tail)
+    | (6%nat,[]) => let u := unquote_runs u env in step constr:(1%nat) constr:(carried_return u v tail)
+    | (7%nat,[?n;?b]) => let u := unquote_runs u env in step constr:(1%nat) constr:(W_multi_six u n b r)
+    end end.
+Ltac computed_macro fuel step c :=
+  let joined := lazymatch fuel with S (S _) => constr:(true) | _ => constr:(false) end in
+  lazymatch c with
+  | counter_pair ?a ?b ?r => quote_nat a constr:(@nil nat) ltac:(fun a env =>
+      quote_nat b env ltac:(fun b env =>
+      let choice := eval vm_compute in (match affine_normal a,affine_normal b with
+        Some na,Some nb => choose_pair na nb | _,_ => None end) in
+      use_choice choice env r constr:(@nil block) constr:(0%nat) step))
+  | tilted ?w ?n ?r => quote_parts w r ltac:(fun wc xs env r =>
+      let choice := eval vm_compute in (choose_tilted joined wc xs) in use_choice choice env r w n step)
+  | carried ?w ?r => quote_parts w r ltac:(fun wc xs env r =>
+      let choice := eval vm_compute in (choose_carried wc xs) in use_choice choice env r w constr:(0%nat) step)
+  | W ?w ?r => quote_core w constr:(@nil nat) ltac:(fun w env =>
+      let choice := eval vm_compute in (match core_runs w with Some wc => choose_W wc | None => None end) in
+      use_choice choice env r constr:(@nil block) constr:(0%nat) step)
+  end.
+Ltac native_step bridge H :=
+  let T := type of H in lazymatch T with ?c -->+ ?d =>
+    lazymatch goal with
+    | |- mixed_return ?g => simple refine (mixed_return_change g c _ (bridge c d H _));
+        [native_eq|idtac]
+    end
+  end.
+Ltac next_macro fuel kont c := computed_macro fuel kont c.
+Ltac macros n := lazymatch goal with |- mixed_return ?c =>
+  next_macro n ltac:(fun used H => let rest := eval cbv[Nat.sub] in (n-used) in
+    lazymatch rest with
+    | O => native_step mixed_return_here H
+    | _ => native_step mixed_return_trans H; macros rest
+    end) c end.
+
+Opaque counter_pair tilted carried W.
+
+Ltac common_macros fuel used kont := lazymatch fuel with
+  | O => kont used
+  | S _ => lazymatch goal with |- mixed_return ?c =>
+      first [next_macro fuel ltac:(fun count H =>
+        native_step mixed_return_trans H;
+        let rest := eval cbv[Nat.sub] in (fuel-count) in
+        let used := eval cbv[Nat.add] in (used+count) in common_macros rest used kont) c |
+        kont used]
+    end
+  end.
+Ltac infer_target which c kont :=
+  lazymatch c with counter_pair ?a ?b ?r =>
+    quote_nat a constr:(@nil nat) ltac:(fun a env => quote_nat b env ltac:(fun b env =>
+    quote_side r env ltac:(fun r env tail =>
+      let result := eval vm_compute in (match affine_normal a,affine_normal b,compile_word (side_word r) with
+        | Some na,Some nb,Some segments => choose_target which na nb segments | _,_,_ => None end) in
+      lazymatch result with Some (?args,?xs) =>
+        let args := unquote_args args env in let tail := unquote_segments xs env tail in kont args tail end))) end.
+Ltac target_member which args tail :=
+  unfold mixed_prefix_target;
+  lazymatch which with
+  | O => left | S O => right; left | S (S O) => right; right; left
+  | S (S (S O)) => right; right; right; left | _ => right; right; right; right end;
+  lazymatch args with
+  | [?a;?b;?c] => exists a,b,c
+  | [?a;?b] => exists a,b end;
+  tail; native_eq.
+Ltac leaf total used which args :=
+  let n := eval cbv[Nat.sub] in (total-used) in macros n;
+  lazymatch args with
+  | [] => lazymatch goal with |- mixed_prefix_target ?c =>
+      infer_target which c ltac:(fun args tail => target_member which args ltac:(exists tail)) end
+  | _ => target_member which args ltac:(eexists) end.
+
+Ltac begin_cases := pose (0%nat) as macro_depth.
+Ltac advance_common shortest :=
+  match goal with depth := ?used : nat |- _ =>
+  let fuel := eval cbv[Nat.sub] in (shortest-1-used) in
+  common_macros fuel used ltac:(fun used => clear depth; pose used as macro_depth) end.
+Ltac parity x shortest :=
+  advance_common shortest;
+  let k := fresh "k" in let H := fresh "Hparity" in
+  destruct (mod2 x) as [k H|k H];
+  [rewrite Nat.mul_comm in H|rewrite Nat.mul_comm,Nat.add_comm in H];
+  subst x; rename k into x.
+Ltac return_to total which args :=
+  match goal with depth := ?used : nat |- _ => leaf total used which args end.
+
+Tactic Notation "split_parity" ident(x) constr(n) := parity x n.
+Tactic Notation "split_zero" ident(x) constr(n) := advance_common n; destruct x as [|x].
+Tactic Notation "return_S22" constr(n) := return_to n constr:(0%nat) constr:(@nil nat).
+Tactic Notation "return_H1" constr(n) := return_to n constr:(1%nat) constr:(@nil nat).
+Tactic Notation "return_QShield" constr(n) constr(args) := return_to n constr:(3) args.
+Tactic Notation "return_QH1" constr(n) constr(args) := return_to n constr:(4) args.
+
+Lemma folded_returns x y z r : mixed_return (folded_front x y z r).
+Proof.
+  unfold folded_front. begin_cases. split_parity x 1%nat.
+  - return_S22 4.
+  - return_S22 1%nat.
+Qed.
+
+Lemma two_gap_returns x y r : mixed_return (two_gap_front x y r).
+Proof.
+  unfold two_gap_front. begin_cases. split_parity x 1%nat.
+  - return_H1 1%nat.
+  - return_S22 2.
+Qed.
+
+Ltac folded_case := lazymatch goal with |- mixed_return (tilted ?w ?n ?r) =>
+  quote_nat n constr:(@nil nat) ltac:(fun ne env =>
+  quote_core w env ltac:(fun we env =>
+  quote_side r env ltac:(fun re env tail =>
+    let data := eval vm_compute in (match affine_normal ne,core_runs we,compile_word (side_word re) with
+      | Some nn,Some wc,Some xs => match scan_prefix [S0;S1] xs with
+        | Some (_,xs) => match scan_core xs with
+          | Some (_,xs) => match skip_symbols 256 6 xs with
+            | Some xs => match scan_headers [5] xs with
+              | Some ([z],xs) => match skip_symbols 256 2 xs with
+                | Some xs => Some (affine_sub nn (affine_const 5),
+                    affine_sub (last wc (affine_const 0)) (affine_const 4),
+                    affine_sub z (affine_const 2),xs)
+                | None => None end
+              | _ => None end
+            | None => None end
+          | None => None end
+        | None => None end
+      | _,_,_ => None end) in
+    lazymatch data with Some (?x,?y,?z,?xs) =>
+      let x := unquote_affine x env in let y := unquote_affine y env in
+      let z := unquote_affine z env in
+      let r := unquote_segments xs env tail in
+      refine (mixed_return_change _ (folded_front x y z r) _ (folded_returns x y z r));
+      native_eq end))) end.
+Ltac two_gap_case := lazymatch goal with |- mixed_return (tilted ?w ?n ?r) =>
+  quote_nat n constr:(@nil nat) ltac:(fun ne env =>
+  quote_core w env ltac:(fun we env =>
+  quote_side r env ltac:(fun re env tail =>
+    let data := eval vm_compute in (match affine_normal ne,core_runs we,compile_word (side_word re) with
+      | Some nn,Some wc,Some xs => match affine_quotient nn 14 3,scan_prefix [S0;S1] xs with
+        | Some x,Some (_,xs) => match affine_quotient (affine_sub (last wc (affine_const 0)) x) 14 2,scan_core xs with
+          | Some y,Some (_,xs) => match scan_headers [7] xs with
+            | Some (_,xs) => match skip_symbols 256 2 xs with
+              | Some xs => Some (x,y,xs) | None => None end
+            | None => None end
+          | _,_ => None end
+        | _,_ => None end
+      | _,_,_ => None end) in
+    lazymatch data with Some (?x,?y,?xs) =>
+      let x := unquote_affine x env in let y := unquote_affine y env in
+      let r := unquote_segments xs env tail in
+      refine (mixed_return_change _ (two_gap_front x y r) _ (two_gap_returns x y r)); native_eq end))) end.
+Tactic Notation "return_folded" constr(n) := advance_common n; folded_case.
+Tactic Notation "return_two_gap" constr(n) := advance_common n; two_gap_case.
+
+Lemma S22_returns a b c r : mixed_return (prefix_S22 a b c r).
+Proof.
+  unfold prefix_S22 at 1. begin_cases. split_parity a 3.
+  - macros constr:(3). target_member constr:(2) constr:([b;c;a]) ltac:(eexists).
+  - split_parity a 6.
+    + return_H1 6.
+    + split_parity b 7.
+      * return_S22 7.
+      * split_parity a 12.
+        -- return_S22 12.
+        -- return_S22 16.
+Qed.
+
+Lemma H1_returns a b r : mixed_return (prefix_H1 a b r).
+Proof.
+  unfold prefix_H1 at 1. begin_cases. split_parity b 3.
+  - split_parity a 4.
+    + split_parity b 11.
+      * return_H1 11.
+      * split_parity a 12.
+        -- split_parity b 17.
+           ++ return_S22 20.
+           ++ return_S22 17.
+        -- return_S22 12.
+    + return_S22 4.
+  - return_QH1 3 [b;a].
+Qed.
+
+Lemma H0_returns a b c r : mixed_return (prefix_H0 a b c r).
+Proof.
+  unfold prefix_H0 at 1. begin_cases. split_parity c 3.
+  - split_parity a 4.
+    + return_S22 4.
+    + split_parity c 11.
+      * split_parity a 12.
+        -- split_parity c 17.
+           ++ return_S22 20.
+           ++ return_S22 17.
+        -- return_S22 12.
+      * return_H1 11.
+  - return_QShield 3 [c;a;b].
+Qed.
+
+Lemma O5_returns a b c d r : mixed_return (counter_pair (24+a) (30+2*b)
+  (pure_page (12+b) (pure_page (11+b) (pure_page (13+b)
+    (pure_page (20+6*c) (pure_page (10+3*c+d) r)))))).
+Proof.
+  begin_cases. split_parity a 3.
+  - split_parity b 3.
+    + return_H1 3.
+    + split_parity a 4.
+      * return_S22 4.
+      * split_parity b 9.
+        -- return_S22 9.
+        -- return_S22 12.
+  - split_parity b 6.
+    + split_parity a 6.
+      * return_H1 6.
+      * split_parity b 7.
+        -- split_parity a 12.
+           ++ return_S22 12.
+           ++ return_S22 16.
+        -- return_S22 7.
+    + split_parity a 7.
+      * return_H1 7.
+      * return_S22 8.
+Qed.
+
+Lemma K5_returns a b c d r :
+  mixed_return (K5front (24+a) (13+2*b) (3+c) (3+d) r).
+Proof.
+  unfold K5front. begin_cases. split_parity a 4.
+  - split_parity a 4.
+    + return_S22 4.
+    + split_parity b 9.
+      * split_parity c 9.
+        -- return_S22 9.
+        -- split_parity a 16.
+           ++ split_parity b 16.
+              ** return_H1 16.
+              ** split_parity c 17.
+                 { return_folded 22. }
+                 { return_S22 17. }
+           ++ split_parity b 16.
+              ** split_parity c 17.
+                 { return_folded 22. }
+                 { return_S22 17. }
+              ** return_H1 16.
+      * split_parity c 13.
+        -- return_two_gap 19.
+        -- return_S22 13.
+  - split_parity a 7.
+    + return_H1 7.
+    + split_parity b 8.
+      * split_parity c 8.
+        -- return_S22 8.
+        -- split_parity a 13.
+           ++ return_S22 13.
+           ++ return_S22 16.
+      * split_parity c 8.
+        -- split_parity a 13.
+           ++ return_S22 13.
+           ++ return_S22 16.
+        -- return_S22 8.
+Qed.
+
+Lemma KEmpty_returns a b c r :
+  mixed_return (KEmptyFront (31+2*a+6*b+2*c) (3+a) (3+b) r).
+Proof.
+  unfold KEmptyFront. begin_cases. split_parity b 4.
+  - split_parity a 9.
+    + split_parity c 9.
+      * split_parity c 19.
+        -- return_S22 20.
+        -- return_H1 19.
+      * return_S22 9.
+    + split_parity c 14.
+      * split_parity a 16.
+        -- split_parity c 16.
+           ++ return_H1 16.
+           ++ return_folded 22.
+        -- split_parity c 16.
+           ++ return_S22 17.
+           ++ return_H1 16.
+      * return_S22 14.
+  - return_S22 4.
+Qed.
+
+Lemma BOddNonempty_returns a b c r :
+  mixed_return (BOddNonemptyFront (13+2*c) (3+a) (3+b) r).
+Proof.
+  unfold BOddNonemptyFront. begin_cases. split_parity a 4.
+  - split_parity b 4.
+    + return_S22 4.
+    + split_parity c 9.
+      * return_S22 9.
+      * split_parity b 17.
+        -- split_parity c 17.
+           ++ return_S22 17.
+           ++ split_parity a 22.
+              ** return_S22 22.
+              ** return_S22 26.
+        -- split_parity c 17.
+           ++ split_parity a 22.
+              ** split_zero c 26.
+                 { return_S22 26. }
+                 { return_S22 26. }
+              ** return_S22 22.
+           ++ return_S22 17.
+  - split_parity b 4.
+    + split_parity c 12.
+      * split_parity a 16.
+        -- split_parity b 16.
+           ++ split_parity c 16.
+              ** return_H1 16.
+              ** return_folded 22.
+           ++ split_parity c 16.
+              ** return_folded 22.
+              ** return_H1 16.
+        -- split_parity b 16.
+           ++ split_parity c 16.
+              ** return_S22 17.
+              ** return_H1 16.
+           ++ split_parity c 16.
+              ** return_H1 16.
+              ** return_S22 17.
+      * return_S22 12.
+    + return_S22 4.
+Qed.
+
+Lemma BOddEmpty_returns a b c r :
+  mixed_return (BOddEmptyFront (35+2*a+6*b+2*c) (3+a) (3+b) r).
+Proof.
+  unfold BOddEmptyFront. begin_cases. split_parity a 4.
+  - split_parity b 4.
+    + return_S22 4.
+    + split_parity c 9.
+      * return_S22 9.
+      * split_parity a 17.
+        -- split_parity c 17.
+           ++ split_parity b 22.
+              ** return_S22 22.
+              ** return_S22 26.
+           ++ return_S22 17.
+        -- split_parity c 17.
+           ++ return_S22 17.
+           ++ split_parity b 22.
+              ** return_S22 26.
+              ** return_S22 22.
+  - split_parity b 4.
+    + split_parity c 12.
+      * split_parity c 16.
+        -- return_H1 16.
+        -- split_parity a 17.
+           ++ return_folded 22.
+           ++ return_S22 17.
+      * return_S22 12.
+    + return_S22 4.
+Qed.
+
+Transparent counter_pair tilted carried W.
+
+Inductive ReturnFamily : Q*tape -> Prop :=
 | family_S a b d r : ReturnFamily (prefix_S22 a b d r)
-| family_H0 d e f r : ReturnFamily (prefix_H0 d e f r)
-| family_H1 d f r : ReturnFamily (prefix_H1 d f r)
+| family_H0 a b c r : ReturnFamily (prefix_H0 a b c r)
+| family_H1 a b r : ReturnFamily (prefix_H1 a b r)
 | family_Q x y indices s v r :
     6<=x -> 13<=y -> 3<=s -> Forall (fun z => 5<=z) indices ->
     ReturnFamily (Qfront x y (exit_chain (x-1) indices s (v++[Three;Three]) r)).
 
 Lemma strong_shield_form a b d r :
-  prefix_S22 a b d r=shield (24+a) (22+4*b) (6+d) r.
+  prefix_S22 a b d r = shield (24+a) (22+4*b) (6+d) r.
 Proof.
-  unfold shield.
-  assert (Hhalf : (22+4*b)/2-1=10+2*b).
-  { replace (22+4*b) with ((11+2*b)*2) by lia.
-    rewrite Nat.div_mul by lia; lia. }
-  rewrite Hhalf; unfold prefix_S22; prefix_config_eq.
+  unfold prefix_S22,shield,pure_page.
+  replace ((22+4*b)/2-1) with (10+2*b); [reflexivity|].
+  replace (22+4*b) with ((11+2*b)*2) by lia.
+  rewrite Nat.div_mul by lia; lia.
 Qed.
 
 Lemma strong_shield_family a b d r :
   24<=a -> 22<=b -> b mod 4=2 -> 6<=d -> ReturnFamily (shield a b d r).
 Proof.
   intros Ha Hb Hmod Hd.
-  pose proof (Nat.div_mod b 4 ltac:(lia)) as Hdivide.
-  replace (shield a b d r) with
-    (prefix_S22 (a-24) (b/4-5) (d-6) r).
+  replace (shield a b d r) with (prefix_S22 (a-24) (b/4-5) (d-6) r).
   - constructor.
   - rewrite strong_shield_form; f_equal; lia.
 Qed.
 
-Lemma protected_chain_empty t s p q r :
-  exit_chain t [] s ((repeat Three p++Six::repeat Three q)++[Three;Three]) r =
-  copies (t+3) [S1;S1;S1;S0]++[S1;S1;S1;S1;S1;S1;S0]++
-  copies (2*s+3) [S1;S1;S1;S0]++[S0;S0;S1;S0;S1]++
-  copies (p+1) [S1;S1;S1;S0]++[S1;S1;S1;S1;S1;S1;S0]++
-  copies (q+4) [S1;S1;S1;S0]++S0::r.
-Proof.
-  cbn [exit_chain]; unfold callback_payload,callback_middle,exit_core.
-  repeat first [rewrite core_bits_app | rewrite core_bits_threes |
-    progress cbn [core_bits block_bits app] | rewrite <- app_assoc].
-  replace (t+3) with (S (t+2)) by lia.
-  replace (p+1) with (S p) by lia.
-  replace (2*s+3) with ((2*s+1)+2) by lia.
-  rewrite (copies_add (2*s+1) 2 [S1;S1;S1;S0]).
-  rewrite (copies_add q 4 [S1;S1;S1;S0]).
-  cbn [copies app]; repeat rewrite <- app_assoc; reflexivity.
-Qed.
-
 Lemma QShield_typed a b e r :
-  prefix_QShield a b e r =
-  Qfront (6+a) (13+3*b)
+  prefix_QShield a b e r = Qfront (6+a) (13+3*b)
     (exit_chain (6+a-1) [] (3+b)
-      ((repeat Three (5+b)++Six::repeat Three e)++[Three;Three])
-      ([S0;S1;S0;S1;S0]++r)).
-Proof.
-  rewrite protected_chain_empty.
-  unfold prefix_QShield,Qfront,qright.
-  prefix_config_eq.
-Qed.
+      (([Three]^^(5+b)++Six::[Three]^^e)++[Three;Three]) ([0;1;0;1;0] *> r)).
+Proof. unfold Qfront,qright,exit_chain,exit_core. native_eq. Qed.
 
-Lemma QH1_typed a d r :
-  prefix_QH1 a d r =
-  Qfront (6+a) (18+3*d)
-    (exit_chain (6+a-1) [] (5+d)
-      ((repeat Three (6+d)++Six::repeat Three (5+2*d))++[Three;Three])
-      ([S0;S1;S0;S1;S0]++r)).
-Proof.
-  rewrite protected_chain_empty.
-  unfold prefix_QH1,Qfront,qright.
-  replace (6*(6+a)+2) with (38+6*a) by lia.
-  replace (2*(18+3*d)+4) with (40+6*d) by lia.
-  replace (18+3*d+2) with (20+3*d) by lia.
-  replace (2*(6+a)+2) with (14+2*a) by lia.
-  replace (6+a-1+3) with (8+a) by lia.
-  replace (2*(5+d)+3) with (13+2*d) by lia.
-  replace (6+d+1) with (7+d) by lia.
-  replace (5+2*d+4) with (9+2*d) by lia.
-  prefix_config_eq.
-Qed.
+Lemma QH1_typed a b r :
+  prefix_QH1 a b r = Qfront (6+a) (18+3*b)
+    (exit_chain (6+a-1) [] (5+b)
+      (([Three]^^(6+b)++Six::[Three]^^(5+2*b))++[Three;Three]) ([0;1;0;1;0] *> r)).
+Proof. unfold Qfront,qright,exit_chain,exit_core. native_eq. Qed.
 
 Lemma mixed_target_family c : mixed_prefix_target c -> ReturnFamily c.
 Proof.
-  intros [[a [b [d [r ->]]]] | [[d [f [r ->]]] |
-    [[d [e [f [r ->]]]] | [[a [s [e [r ->]]]] | [a [d [r ->]]]]]]].
+  intros [[a [b [d [r ->]]]] | [[a [b [r ->]]] |
+    [[a [b [d [r ->]]]] | [[a [b [d [r ->]]]] | [a [b [r ->]]]]]]].
   - apply family_S.
   - apply family_H1.
   - apply family_H0.
-  - rewrite QShield_typed; apply family_Q; try lia; constructor.
-  - rewrite QH1_typed; apply family_Q; try lia; constructor.
+  - rewrite QShield_typed. apply family_Q; try lia; constructor.
+  - rewrite QH1_typed. apply family_Q; try lia; constructor.
 Qed.
 
-Lemma mixed_return_family c : mixed_return c ->
-  exists d, Progress c d /\ ReturnFamily d.
+Lemma mixed_return_family c : mixed_return c -> exists d, c -->+ d /\ ReturnFamily d.
 Proof.
-  intros [d [Hstep Htarget]]; exists d; split; [exact Hstep |].
-  apply mixed_target_family; exact Htarget.
-Qed.
-
-Lemma return_family_live c : ReturnFamily c -> step c<>None.
-Proof.
-  intro H; destruct H;
-    cbn [prefix_S22 prefix_H0 prefix_H1
-      Qfront counter_pair step st scan]; discriminate.
-Qed.
-
-Lemma five_target_family c : five_prefix_target c -> ReturnFamily c.
-Proof.
-  intros [[a [b [d [r ->]]]] | [d [f [r ->]]]].
-  - exact (family_S a b d r).
-  - exact (family_H1 d f r).
-Qed.
-
-Lemma five_return_family c : five_return c ->
-  exists d, Progress c d /\ ReturnFamily d.
-Proof.
-  intros [d [Hstep Htarget]]; exists d; split; [exact Hstep |].
-  apply five_target_family; exact Htarget.
+  intros [d Hstep Htarget]. exists d. split; [exact Hstep|].
+  apply mixed_target_family,Htarget.
 Qed.
 
 Lemma K5_return_family a c x h r :
-  24<=a -> 13<=c -> c mod 2=1 -> 3<=x -> 3<=h ->
-  exists d, Progress (K5front a c x h r) d /\ ReturnFamily d.
+  24<=a -> 13<=c -> c mod 2=1%nat -> 3<=x -> 3<=h ->
+  exists d, K5front a c x h r -->+ d /\ ReturnFamily d.
 Proof.
   intros Ha Hc Hodd Hx Hh.
-  pose proof (Nat.div_mod c 2 ltac:(lia)) as Hdivide.
-  apply five_return_family.
-  eapply five_prefix_return_change.
+  apply mixed_return_family. eapply mixed_return_change.
   2: exact (K5_returns (a-24) (c/2-6) (x-3) (h-3) r).
-  unfold K5front,prefix_K5; prefix_config_eq_fast.
+  unfold K5front. native_eq.
 Qed.
 
 Lemma O5_return_family a k x offset r :
-  24<=a -> 12<=k -> 3<=x -> (offset=1 \/ offset=2) ->
-  exists d, Progress (O5front a k x offset r) d /\ ReturnFamily d.
+  24<=a -> 12<=k -> 3<=x -> (offset=1%nat \/ offset=2) ->
+  exists d, O5front a k x offset r -->+ d /\ ReturnFamily d.
 Proof.
-  intros Ha Hk Hx [Hoffset|Hoffset]; subst offset; apply five_return_family.
-  - eapply five_prefix_return_change.
-    2: exact (O5_1_returns (a-24) (k-12) (x-3) r).
-    unfold O5front,prefix_O5_1; prefix_config_eq_fast.
-  - eapply five_prefix_return_change.
-    2: exact (O5_2_returns (a-24) (k-12) (x-3) r).
-    unfold O5front,prefix_O5_2; prefix_config_eq_fast.
+  intros Ha Hk Hx Hoffset. destruct Hoffset as [Hoffset|Hoffset]; subst offset;
+    apply mixed_return_family.
+  - eapply mixed_return_change.
+    2: exact (O5_returns (a-24) (k-12) (x-3) 0 r).
+    unfold O5front. native_eq.
+  - eapply mixed_return_change.
+    2: exact (O5_returns (a-24) (k-12) (x-3) 1 r).
+    unfold O5front. native_eq.
 Qed.
 
-Lemma short_target_family c : short_prefix_target c -> ReturnFamily c.
-Proof.
-  intros [[a [b [d [r ->]]]] | [d [f [r ->]]]].
-  - exact (family_S a b d r).
-  - exact (family_H1 d f r).
-Qed.
-
-Lemma short_return_family c : short_return c ->
-  exists d, Progress c d /\ ReturnFamily d.
-Proof.
-  intros [d [Hstep Htarget]]; exists d; split; [exact Hstep |].
-  apply short_target_family; exact Htarget.
-Qed.
-
-Lemma KEmpty_return_family x h s r :
-  3<=x -> 3<=h -> 3<=s -> s mod 2=1 ->
-  exists d, Progress (KEmptyFront (2*x+6*h+s+4) x h r) d /\ ReturnFamily d.
+Lemma KEmpty_return_family x h s r : 3<=x -> 3<=h -> 3<=s -> s mod 2=1%nat ->
+  exists d, KEmptyFront (2*x+6*h+s+4) x h r -->+ d /\ ReturnFamily d.
 Proof.
   intros Hx Hh Hs Hodd.
-  pose proof (Nat.div_mod s 2 ltac:(lia)) as Hdivide.
-  apply short_return_family.
-  eapply short_prefix_return_change.
+  apply mixed_return_family. eapply mixed_return_change.
   2: exact (KEmpty_returns (x-3) (h-3) (s/2-1) r).
-  unfold KEmptyFront,prefix_KEmpty; prefix_config_eq_fast.
+  unfold KEmptyFront. native_eq.
 Qed.
 
 Lemma BOddNonempty_return_family c x h r :
-  13<=c -> c mod 2=1 -> 3<=x -> 3<=h ->
-  exists d, Progress (BOddNonemptyFront c x h r) d /\ ReturnFamily d.
+  13<=c -> c mod 2=1%nat -> 3<=x -> 3<=h ->
+  exists d, BOddNonemptyFront c x h r -->+ d /\ ReturnFamily d.
 Proof.
   intros Hc Hodd Hx Hh.
-  pose proof (Nat.div_mod c 2 ltac:(lia)) as Hdivide.
-  apply short_return_family.
-  eapply short_prefix_return_change.
+  apply mixed_return_family. eapply mixed_return_change.
   2: exact (BOddNonempty_returns (x-3) (h-3) (c/2-6) r).
-  unfold BOddNonemptyFront,prefix_BOddNonempty; prefix_config_eq_fast.
+  unfold BOddNonemptyFront. native_eq.
 Qed.
 
-Lemma BOddEmpty_return_family x h s r :
-  3<=x -> 3<=h -> 4<=s -> s mod 2=0 ->
-  exists d, Progress (BOddEmptyFront (2*x+6*h+s+7) x h r) d /\ ReturnFamily d.
+Lemma BOddEmpty_return_family x h s r : 3<=x -> 3<=h -> 4<=s -> s mod 2=0%nat ->
+  exists d, BOddEmptyFront (2*x+6*h+s+7) x h r -->+ d /\ ReturnFamily d.
 Proof.
   intros Hx Hh Hs Heven.
-  pose proof (Nat.div_mod s 2 ltac:(lia)) as Hdivide.
-  apply short_return_family.
-  eapply short_prefix_return_change.
+  apply mixed_return_family. eapply mixed_return_change.
   2: exact (BOddEmpty_returns (x-3) (h-3) (s/2-2) r).
-  unfold BOddEmptyFront,prefix_BOddEmpty; prefix_config_eq_fast.
+  unfold BOddEmptyFront. native_eq.
 Qed.
 
 Lemma indices_positive indices :
@@ -4528,7 +2515,7 @@ Lemma q_page_as_front x b indices s v r :
 Proof.
   unfold q_page_output,q_pages_front.
   replace (6*(2*x)+4) with (12*x+4) by lia.
-  replace (3*(2*x)+1) with (6*x+1) by lia; reflexivity.
+  replace (3*(2*x)+1) with (6*x+1) by lia. reflexivity.
 Qed.
 
 Lemma q_page_size x b indices s : 3<=x -> 6<=b -> 3<=s ->
@@ -4536,110 +2523,79 @@ Lemma q_page_size x b indices s : 3<=x -> 6<=b -> 3<=s ->
 Proof. unfold q_page_a; lia. Qed.
 
 Lemma q_pages_zero_family a x b indices s v r :
-  62<=a -> 3<=x -> 6<=b -> Forall (fun z => 1<=z) indices -> a mod 4=0 ->
-  exists d, Progress (q_pages_front a x b indices s v r) d /\ ReturnFamily d.
+  62<=a -> 3<=x -> 6<=b -> Forall (fun z => 1<=z) indices -> a mod 4=0%nat ->
+  exists d, q_pages_front a x b indices s v r -->+ d /\ ReturnFamily d.
 Proof.
   intros Ha Hx Hb Hindices Hmod.
-  pose proof (Nat.div_mod a 4 ltac:(lia)) as Hdivide.
-  set (k:=a/4-1).
-  assert (Hk : 5<=k) by (unfold k; lia).
+  set (k:=a/4-1). assert (Hk : 5<=k) by (unfold k; lia).
   assert (Hform : a=4*k+4) by (unfold k; lia).
   destruct (even_frontier_frame_shield k x b indices s v r Hk ltac:(lia) ltac:(lia) Hindices)
-    as [clock [aa [rr [Hclock [Haa Hreturn]]]]].
-  exists (shield aa (4*k+6) (6*x+2) rr); split.
-  - unfold q_pages_front; rewrite Hform; exists clock; auto.
-  - apply strong_shield_family; try lia.
-    replace (4*k+6) with (2+(k+1)*4) by lia.
-    rewrite Nat.mod_add by lia; reflexivity.
+    as [aa [rr [Haa Hreturn]]].
+  exists (shield aa (4*k+6) (6*x+2) rr). split.
+  - unfold q_pages_front. rewrite Hform. exact Hreturn.
+  - apply strong_shield_family; lia.
 Qed.
 
 Lemma q_pages_odd_family a x b indices s v r :
-  62<=a -> 3<=x -> 6<=b -> Forall (fun z => 1<=z) indices -> a mod 2=1 ->
-  exists d, Progress (q_pages_front a x b indices s v r) d /\ ReturnFamily d.
+  62<=a -> 3<=x -> 6<=b -> Forall (fun z => 1<=z) indices -> a mod 2=1%nat ->
+  exists d, q_pages_front a x b indices s v r -->+ d /\ ReturnFamily d.
 Proof.
   intros Ha Hx Hb Hindices Hmod.
-  pose proof (Nat.div_mod a 2 ltac:(lia)) as Hdivide.
-  set (k:=a/2-1).
-  assert (Hk : 11<=k) by (unfold k; lia).
+  set (k:=a/2-1). assert (Hk : 11<=k) by (unfold k; lia).
   assert (Hform : a=2*k+3) by (unfold k; lia).
   destruct (q_pages_odd k x b indices s v r Hk Hx Hb Hindices)
     as [aa [offset [tail [Haa [Hoffset Hreturn]]]]].
   destruct (O5_return_family aa (k+1) x offset tail Haa ltac:(lia) Hx Hoffset)
     as [d [Hnext Hd]].
-  exists d; split; [|exact Hd].
-  rewrite Hform; eapply progress_trans; eauto.
+  exists d. split; [|exact Hd]. rewrite Hform. eapply progress_trans; eauto.
 Qed.
 
 Lemma q_pages_two_family x b indices s v r :
   3<=x -> 6<=b -> 3<=s -> Forall (fun z => 5<=z) indices ->
   q_page_a (2*x) b indices s mod 4=2 ->
-  exists d, Progress (q_pages_front (q_page_a (2*x) b indices s) x b indices s v r) d /\
-    ReturnFamily d.
+  exists d, q_pages_front (q_page_a (2*x) b indices s) x b indices s v r -->+ d /\ ReturnFamily d.
 Proof.
-  intros Hx Hb Hs Hindices Hmod.
-  set (a:=q_page_a (2*x) b indices s) in *.
+  intros Hx Hb Hs Hindices Hmod. set (a:=q_page_a (2*x) b indices s) in *.
   assert (Ha : 62<=a) by (unfold a; apply q_page_size; assumption).
   assert (Hfull : a=4*x+6*b+chain_growth indices+2*s+8) by (unfold a,q_page_a; lia).
-  pose proof (Nat.div_mod a 4 ltac:(lia)) as Ha4.
-  pose proof (Nat.div_mod a 2 ltac:(lia)) as Ha2.
-  pose proof (Nat.mod_upper_bound a 2 ltac:(lia)) as Ham.
-  set (k:=a/2-1).
-  assert (Hform : a=2*k+2) by (unfold k; lia).
+  set (k:=a/2-1). assert (Hform : a=2*k+2) by (unfold k; lia).
   assert (Hc : 13<=k+1) by lia.
-  pose proof (Nat.div_mod (k+1) 2 ltac:(lia)) as Hc2.
-  pose proof (Nat.mod_upper_bound (k+1) 2 ltac:(lia)) as Hcm.
-  assert (Hodd : (k+1) mod 2=1) by lia.
-  pose proof (Nat.div_mod b 2 ltac:(lia)) as Hb2.
-  pose proof (Nat.mod_upper_bound b 2 ltac:(lia)) as Hbm.
-  remember (b/2) as h.
-  assert (Hcases : b=2*h \/ b=2*h+1) by lia.
+  assert (Hodd : (k+1) mod 2=1%nat) by lia.
+  remember (b/2) as h. assert (Hcases : b=2*h \/ b=2*h+1) by lia.
   destruct Hcases as [Hbf|Hbf]; subst b; assert (Hh : 3<=h) by lia;
     destruct indices as [|z indices].
-  - cbn [chain_growth] in Hfull.
-    pose proof (Nat.div_mod s 2 ltac:(lia)) as Hs2.
-    pose proof (Nat.mod_upper_bound s 2 ltac:(lia)) as Hsm.
-    assert (Hsodd : s mod 2=1) by lia.
+  - cbn[chain_growth] in Hfull.
+    assert (Hsodd : s mod 2=1%nat) by lia.
     assert (Hcounter : k+1=2*x+6*h+s+4) by lia.
-    destruct (KEmpty_return_family x h s (frame_body s v r) Hx Hh Hs Hsodd)
-      as [d [Hnext Hd]].
-    exists d; split; [|exact Hd].
-    rewrite Hform; eapply progress_trans.
+    destruct (KEmpty_return_family x h s (frame_body s v r) Hx Hh Hs Hsodd) as [d [Hnext Hd]].
+    exists d. split; [|exact Hd]. rewrite Hform. eapply progress_trans.
     + apply q_pages_even_empty; lia.
-    + rewrite Hcounter; exact Hnext.
-  - pose proof (Forall_inv Hindices) as Hz.
-    change (5<=z) in Hz.
+    + rewrite Hcounter. exact Hnext.
+  - pose proof (Forall_inv Hindices) as Hz. change (5<=z) in Hz.
     pose proof (indices_positive _ (Forall_inv_tail Hindices)) as Htail.
     destruct (q_pages_even_nonempty k x h z indices s v r Hx Hh ltac:(lia) Htail)
       as [aa [tail [Haa Hreturn]]].
-    destruct (K5_return_family aa (k+1) x h tail Haa Hc Hodd Hx Hh)
-      as [d [Hnext Hd]].
-    exists d; split; [|exact Hd].
-    rewrite Hform; eapply progress_trans; eauto.
-  - cbn [chain_growth] in Hfull.
-    pose proof (Nat.div_mod s 2 ltac:(lia)) as Hs2.
-    pose proof (Nat.mod_upper_bound s 2 ltac:(lia)) as Hsm.
-    assert (Hseven : s mod 2=0) by lia.
-    assert (Hs4 : 4<=s) by lia.
+    destruct (K5_return_family aa (k+1) x h tail Haa Hc Hodd Hx Hh) as [d [Hnext Hd]].
+    exists d. split; [|exact Hd]. rewrite Hform. eapply progress_trans; eauto.
+  - cbn[chain_growth] in Hfull.
+    assert (Hseven : s mod 2=0%nat) by lia. assert (Hs4 : 4<=s) by lia.
     assert (Hcounter : k+1=2*x+6*h+s+7) by lia.
-    destruct (BOddEmpty_return_family x h s (frame_body s v r) Hx Hh Hs4 Hseven)
-      as [d [Hnext Hd]].
-    exists d; split; [|exact Hd].
-    rewrite Hform; eapply progress_trans.
+    destruct (BOddEmpty_return_family x h s (frame_body s v r) Hx Hh Hs4 Hseven) as [d [Hnext Hd]].
+    exists d. split; [|exact Hd]. rewrite Hform. eapply progress_trans.
     + apply q_pages_bodd_empty; lia.
-    + rewrite Hcounter; exact Hnext.
+    + rewrite Hcounter. exact Hnext.
   - destruct (BOddNonempty_return_family (k+1) x h (frame_pages z indices s v r)
       Hc Hodd Hx Hh) as [d [Hnext Hd]].
-    exists d; split; [|exact Hd].
-    rewrite Hform; eapply progress_trans.
+    exists d. split; [|exact Hd]. rewrite Hform. eapply progress_trans.
     + apply q_pages_bodd_nonempty; lia.
     + exact Hnext.
 Qed.
 
 Lemma q_pages_family x b indices s v r :
   3<=x -> 6<=b -> 3<=s -> Forall (fun z => 5<=z) indices ->
-  exists d, Progress (q_page_output (2*x) b indices s v r) d /\ ReturnFamily d.
+  exists d, q_page_output (2*x) b indices s v r -->+ d /\ ReturnFamily d.
 Proof.
-  intros Hx Hb Hs Hindices; rewrite q_page_as_front.
+  intros Hx Hb Hs Hindices. rewrite q_page_as_front.
   pose proof (q_page_size x b indices s Hx Hb Hs) as Ha.
   pose proof (indices_positive _ Hindices) as Hpositive.
   set (a:=q_page_a (2*x) b indices s) in *.
@@ -4647,112 +2603,71 @@ Proof.
   - apply q_pages_zero_family; assumption.
   - destruct (Nat.eq_dec (a mod 4) 2) as [Ht|Ht].
     + apply q_pages_two_family; assumption.
-    + apply q_pages_odd_family; try assumption.
-      pose proof (Nat.div_mod a 4 ltac:(lia)) as H4.
-      pose proof (Nat.mod_upper_bound a 4 ltac:(lia)) as H4m.
-      pose proof (Nat.div_mod a 2 ltac:(lia)) as H2.
-      pose proof (Nat.mod_upper_bound a 2 ltac:(lia)) as H2m; lia.
+    + apply q_pages_odd_family; try assumption; lia.
 Qed.
 
 Lemma Q_even_exit_family x b indices s v r :
   3<=x -> 6<=b -> 3<=s -> Forall (fun z => 5<=z) indices ->
-  exists d, Progress (Qfront (2*x) (2*b+1)
-    (exit_chain (2*x-1) indices s (v++[Three;Three]) r)) d /\ ReturnFamily d.
+  exists d, Qfront (2*x) (2*b+1) (exit_chain (2*x-1) indices s (v++[Three;Three]) r) -->+ d /\
+    ReturnFamily d.
 Proof.
   intros Hx Hb Hs Hindices.
   destruct (q_pages_family x b indices s v r Hx Hb Hs Hindices) as [d [Hnext Hd]].
-  exists d; split; [|exact Hd].
-  eapply progress_after; [apply Q_page_return; lia |exact Hnext].
+  exists d. split; [|exact Hd]. eapply progress_trans; [apply Q_page_return; lia|exact Hnext].
 Qed.
 
 Lemma Q_odd_exit_family a b indices s v r : 3<=a -> 6<=b -> 3<=s ->
-  exists d, Progress (Qfront (2*a+1) (2*b+1)
-    (exit_chain (2*a) indices s (v++[Three;Three]) r)) d /\ ReturnFamily d.
+  exists d, Qfront (2*a+1) (2*b+1) (exit_chain (2*a) indices s (v++[Three;Three]) r) -->+ d /\
+    ReturnFamily d.
 Proof.
   intros Ha Hb Hs.
-  destruct (Q_odd_chain_to_shield indices a b s (v++[Three;Three]) r ltac:(lia) ltac:(lia))
+  destruct (Q_odd_shield indices a b s (v++[Three;Three]) r ltac:(lia) ltac:(lia))
     as [aa [rr [Haa [Hd Hreturn]]]].
-  exists (shield aa (12*a+10) (2*b+3) rr); split.
-  - eexists; split; [|exact Hreturn]; unfold qodd_clock; lia.
-  - apply strong_shield_family; try lia.
-    replace (12*a+10) with (2+(3*a+2)*4) by lia.
-    rewrite Nat.mod_add by lia; reflexivity.
+  exists (shield aa (12*a+10) (2*b+3) rr). split; [exact Hreturn|].
+  apply strong_shield_family; lia.
 Qed.
 
 Lemma Q_family_return x y indices s v r :
   6<=x -> 13<=y -> 3<=s -> Forall (fun z => 5<=z) indices ->
-  exists d, Progress (Qfront x y (exit_chain (x-1) indices s (v++[Three;Three]) r)) d /\
-    ReturnFamily d.
+  exists d, Qfront x y (exit_chain (x-1) indices s (v++[Three;Three]) r) -->+ d /\ ReturnFamily d.
 Proof.
-  intros Hx Hy Hs Hindices.
-  destruct (Q_strong_chain_exit x y indices s (v++[Three;Three]) r Hx Hy Hindices)
-    as [xf [b [output_indices [n [t [Hxf [Hb [Hpositive [Hlength [Hrun Hadvance]]]]]]]]]].
-  pose proof (Nat.div_mod xf 2 ltac:(lia)) as Hdivide.
-  pose proof (Nat.mod_upper_bound xf 2 ltac:(lia)) as Hmod.
-  destruct (Nat.eq_dec (xf mod 2) 0) as [Heven|Hodd].
-  - assert (Hform : xf=2*(xf/2)) by lia.
-    destruct (Q_even_exit_family (xf/2) b output_indices s v r ltac:(lia) Hb Hs Hpositive)
-      as [d [Hnext Hd]].
-    exists d; split; [|exact Hd].
-    eapply progress_after; [exact Hadvance |].
-    rewrite Hform; exact Hnext.
-  - assert (Hform : xf=2*(xf/2)+1) by lia.
-    destruct (Q_odd_exit_family (xf/2) b output_indices s v r ltac:(lia) Hb Hs)
-      as [d [Hnext Hd]].
-    exists d; split; [|exact Hd].
-    eapply progress_after; [exact Hadvance |].
-    rewrite Hform.
-    replace (2*(xf/2)+1-1) with (2*(xf/2)) by lia; exact Hnext.
+  intros Hx Hy Hs Hindices. destruct (mod2 y) as [b Hform|b Hform].
+  - replace y with (2*b) by lia.
+    exists (Qfront b (3*x) (exit_chain (b-1) ((x-1)::indices) s (v++[Three;Three]) r)).
+    split.
+    + rewrite <- qframe_exit_chain by lia. apply Q_push.
+    + apply family_Q; try lia. constructor; [lia|exact Hindices].
+  - replace y with (2*b+1) by lia. destruct (mod2 x) as [a Hfirst|a Hfirst].
+    + replace x with (2*a) by lia. apply Q_even_exit_family; try lia; assumption.
+    + replace x with (2*a+1) by lia.
+      replace (2*a+1-1) with (2*a) by lia. apply Q_odd_exit_family; lia.
 Qed.
 
-Lemma return_family_closed c : ReturnFamily c ->
-  exists d, Progress c d /\ ReturnFamily d.
+Lemma return_family_closed c : ReturnFamily c -> exists d, c -->+ d /\ ReturnFamily d.
 Proof.
-  intro H; destruct H as [a b d r |d e f r |d f r |x y indices s v r Hx Hy Hs Hindices].
-  - apply mixed_return_family; exact (S22_returns a b d r).
-  - apply mixed_return_family; exact (H0_returns d e f r).
-  - apply mixed_return_family; exact (H1_returns d f r).
-  - exact (Q_family_return x y indices s v r Hx Hy Hs Hindices).
+  intro H. destruct H as [a b d r|a b c r|a b r|x y indices s v r Hx Hy Hs Hindices].
+  - apply mixed_return_family,S22_returns.
+  - apply mixed_return_family,H0_returns.
+  - apply mixed_return_family,H1_returns.
+  - apply Q_family_return; assumption.
 Qed.
 
-Definition decoded_return_family (c : Q * tape) : Prop :=
-  exists a, ReturnFamily a /\ c = decode a.
-
-Lemma decoded_return_family_closed c : decoded_return_family c ->
-  exists d, decoded_return_family d /\ c -[tm]->+ d.
+Lemma init : exists r, c0 -->* prefix_S22 35 12 8 r.
 Proof.
-  intros [a [Ha ->]].
-  destruct (return_family_closed a Ha) as [b [[n [Hn Hrun]] Hb]].
-  exists (decode b); split.
-  - exists b; auto.
-  - rewrite <- Hrun; apply advance_progress; [exact Hn|].
-    rewrite Hrun; apply return_family_live; exact Hb.
-Qed.
-
-Definition blank_family_entry := shield 59 70 14 (shield59_tail shield28_tail).
-
-Definition blank_entry_clock := 64259+553376.
-
-Lemma blank_to_family_entry : advance blank_entry_clock blank=blank_family_entry.
-Proof.
-  unfold blank_entry_clock.
-  rewrite advance_add,blank_to_shield64259,shield28_to59; reflexivity.
-Qed.
-
-Lemma blank_entry_member : ReturnFamily blank_family_entry.
-Proof.
-  unfold blank_family_entry; apply strong_shield_family; try lia; reflexivity.
+  eexists. unfold prefix_S22,pure_page,counter_pair,page.
+  eapply without_counter with (n:=N.to_nat 617635%N).
+  eapply multistep_c_spec. vm_compute; reflexivity.
 Qed.
 
 (* Main result *)
 
 Lemma nonhalt: ~halts tm c0.
 Proof.
-  eapply multistep_nonhalt with (c' := decode blank_family_entry).
-  - rewrite <- decode_blank, <- blank_to_family_entry; apply advance_evstep.
-  - eapply progress_nonhalt with (P := decoded_return_family).
-    + exact decoded_return_family_closed.
-    + exists blank_family_entry; split; [exact blank_entry_member|reflexivity].
+  destruct init as [r H].
+  eapply multistep_nonhalt with (c':=prefix_S22 35 12 8 r); [exact H|].
+  eapply progress_nonhalt with (P:=ReturnFamily).
+  - intros c Hc. destruct (return_family_closed c Hc) as [d [Hd HF]].
+    exists d. split; assumption.
+  - constructor.
 Qed.
-
 Print Assumptions nonhalt.
